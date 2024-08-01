@@ -35,6 +35,7 @@ import {
     setWorldInfoButtonClass,
     importWorldInfo,
     wi_anchor_position,
+    world_info_include_names,
 } from './scripts/world-info.js';
 
 import {
@@ -100,6 +101,7 @@ import {
     proxies,
     loadProxyPresets,
     selected_proxy,
+    initOpenai,
 } from './scripts/openai.js';
 
 import {
@@ -158,7 +160,7 @@ import {
 import { debounce_timeout } from './scripts/constants.js';
 
 import { ModuleWorkerWrapper, doDailyExtensionUpdatesCheck, extension_settings, getContext, loadExtensionSettings, renderExtensionTemplate, renderExtensionTemplateAsync, runGenerationInterceptors, saveMetadataDebounced, writeExtensionField } from './scripts/extensions.js';
-import { COMMENT_NAME_DEFAULT, executeSlashCommands, executeSlashCommandsOnChatInput, getSlashCommandsHelp, initDefaultSlashCommands, isExecutingCommandsFromChatInput, pauseScriptExecution, processChatSlashCommands, registerSlashCommand, stopScriptExecution } from './scripts/slash-commands.js';
+import { COMMENT_NAME_DEFAULT, executeSlashCommands, executeSlashCommandsOnChatInput, executeSlashCommandsWithOptions, getSlashCommandsHelp, initDefaultSlashCommands, isExecutingCommandsFromChatInput, pauseScriptExecution, processChatSlashCommands, registerSlashCommand, stopScriptExecution } from './scripts/slash-commands.js';
 import {
     tag_map,
     tags,
@@ -227,7 +229,7 @@ import { appendFileContent, hasPendingFileAttachment, populateFileAttachment, de
 import { initPresetManager } from './scripts/preset-manager.js';
 import { MacrosParser, evaluateMacros } from './scripts/macros.js';
 import { currentUser, setUserControls } from './scripts/user.js';
-import { POPUP_TYPE, Popup, callGenericPopup, fixToastrForDialogs } from './scripts/popup.js';
+import { POPUP_RESULT, POPUP_TYPE, Popup, callGenericPopup, fixToastrForDialogs } from './scripts/popup.js';
 import { renderTemplate, renderTemplateAsync } from './scripts/templates.js';
 import { ScraperManager } from './scripts/scrapers.js';
 import { SlashCommandParser } from './scripts/slash-commands/SlashCommandParser.js';
@@ -520,6 +522,7 @@ const chatElement = $('#chat');
 let dialogueResolve = null;
 let dialogueCloseStop = false;
 export let chat_metadata = {};
+/** @type {StreamingProcessor} */
 export let streamingProcessor = null;
 let crop_data = undefined;
 let is_delete_mode = false;
@@ -567,6 +570,7 @@ export const system_message_types = {
  * @enum {number} Extension prompt types
  */
 export const extension_prompt_types = {
+    NONE: -1,
     IN_PROMPT: 0,
     IN_CHAT: 1,
     BEFORE_PROMPT: 2,
@@ -837,6 +841,7 @@ export let main_api;// = "kobold";
 //novel settings
 export let novelai_settings;
 export let novelai_setting_names;
+/** @type {AbortController} */
 let abortController;
 
 //css
@@ -848,6 +853,7 @@ var kobold_horde_model = '';
 export let token;
 
 var PromptArrayItemForRawPromptDisplay;
+var priorPromptArrayItemForRawPromptDisplay;
 
 /** The tag of the active character. (NOT the id) */
 export let active_character = '';
@@ -903,13 +909,14 @@ async function firstLoadInit() {
     await getClientVersion();
     await readSecretState();
     initLocales();
+    initDefaultSlashCommands();
     await getSystemMessages();
     sendSystemMessage(system_message_types.WELCOME);
     await getSettings();
     initKeyboard();
     initDynamicStyles();
     initTags();
-    initDefaultSlashCommands();
+    initOpenai();
     await getUserAvatars(true, user_avatar);
     await getCharacters();
     await getBackgrounds();
@@ -923,8 +930,15 @@ async function firstLoadInit() {
     initCfg();
     initLogprobs();
     doDailyExtensionUpdatesCheck();
-    hideLoader();
+    await hideLoader();
+    await fixViewport();
     await eventSource.emit(event_types.APP_READY);
+}
+
+async function fixViewport() {
+    document.body.style.position = 'absolute';
+    await delay(1);
+    document.body.style.position = '';
 }
 
 function cancelStatusCheck() {
@@ -2258,6 +2272,7 @@ export function addOneMessage(mes, { type = 'normal', insertAfter = null, scroll
 
     if (type === 'swipe') {
         const swipeMessage = chatElement.find(`[mesid="${chat.length - 1}"]`);
+        swipeMessage.attr('swipeid', params.swipeId);
         swipeMessage.find('.mes_text').html(messageText).attr('title', title);
         swipeMessage.find('.timestamp').text(timestamp).attr('title', `${params.extra.api} - ${params.extra.model}`);
         appendMediaToMessage(mes, swipeMessage);
@@ -2790,6 +2805,12 @@ class StreamingProcessor {
     constructor(type, force_name2, timeStarted, messageAlreadyGenerated) {
         this.result = '';
         this.messageId = -1;
+        this.messageDom = null;
+        this.messageTextDom = null;
+        this.messageTimerDom = null;
+        this.messageTokenCounterDom = null;
+        /** @type {HTMLTextAreaElement} */
+        this.sendTextarea = document.querySelector('#send_textarea');
         this.type = type;
         this.force_name2 = force_name2;
         this.isStopped = false;
@@ -2802,6 +2823,15 @@ class StreamingProcessor {
         this.swipes = [];
         /** @type {import('./scripts/logprobs.js').TokenLogprobs[]} */
         this.messageLogprobs = [];
+    }
+
+    #checkDomElements(messageId) {
+        if (this.messageDom === null || this.messageTextDom === null) {
+            this.messageDom = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
+            this.messageTextDom = this.messageDom?.querySelector('.mes_text');
+            this.messageTimerDom = this.messageDom?.querySelector('.mes_timer');
+            this.messageTokenCounterDom = this.messageDom?.querySelector('.tokenCounterDisplay');
+        }
     }
 
     showMessageButtons(messageId) {
@@ -2826,11 +2856,13 @@ class StreamingProcessor {
         let messageId = -1;
 
         if (this.type == 'impersonate') {
-            $('#send_textarea').val('')[0].dispatchEvent(new Event('input', { bubbles: true }));
+            this.sendTextarea.value = '';
+            this.sendTextarea.dispatchEvent(new Event('input', { bubbles: true }));
         }
         else {
             await saveReply(this.type, text, true);
             messageId = chat.length - 1;
+            this.#checkDomElements(messageId);
             this.showMessageButtons(messageId);
         }
 
@@ -2862,12 +2894,14 @@ class StreamingProcessor {
         }
 
         if (isImpersonate) {
-            $('#send_textarea').val(processedText)[0].dispatchEvent(new Event('input', { bubbles: true }));
+            this.sendTextarea.value = processedText;
+            this.sendTextarea.dispatchEvent(new Event('input', { bubbles: true }));
         }
         else {
-            let currentTime = new Date();
+            this.#checkDomElements(messageId);
+            const currentTime = new Date();
             // Don't waste time calculating token count for streaming
-            let currentTokenCount = isFinal && power_user.message_token_count_enabled ? getTokenCount(processedText, 0) : 0;
+            const currentTokenCount = isFinal && power_user.message_token_count_enabled ? getTokenCount(processedText, 0) : 0;
             const timePassed = formatGenerationTimer(this.timeStarted, currentTime, currentTokenCount);
             chat[messageId]['mes'] = processedText;
             chat[messageId]['gen_started'] = this.timeStarted;
@@ -2879,8 +2913,9 @@ class StreamingProcessor {
                 }
 
                 chat[messageId]['extra']['token_count'] = currentTokenCount;
-                const tokenCounter = $(`#chat .mes[mesid="${messageId}"] .tokenCounterDisplay`);
-                tokenCounter.text(`${currentTokenCount}t`);
+                if (this.messageTokenCounterDom instanceof HTMLElement) {
+                    this.messageTokenCounterDom.textContent = `${currentTokenCount}t`;
+                }
             }
 
             if ((this.type == 'swipe' || this.type === 'continue') && Array.isArray(chat[messageId]['swipes'])) {
@@ -2888,16 +2923,20 @@ class StreamingProcessor {
                 chat[messageId]['swipe_info'][chat[messageId]['swipe_id']] = { 'send_date': chat[messageId]['send_date'], 'gen_started': chat[messageId]['gen_started'], 'gen_finished': chat[messageId]['gen_finished'], 'extra': JSON.parse(JSON.stringify(chat[messageId]['extra'])) };
             }
 
-            let formattedText = messageFormatting(
+            const formattedText = messageFormatting(
                 processedText,
                 chat[messageId].name,
                 chat[messageId].is_system,
                 chat[messageId].is_user,
                 messageId,
             );
-            const mesText = $(`#chat .mes[mesid="${messageId}"] .mes_text`);
-            mesText.html(formattedText);
-            $(`#chat .mes[mesid="${messageId}"] .mes_timer`).text(timePassed.timerValue).attr('title', timePassed.timerTitle);
+            if (this.messageTextDom instanceof HTMLElement) {
+                this.messageTextDom.innerHTML = formattedText;
+            }
+            if (this.messageTimerDom instanceof HTMLElement) {
+                this.messageTimerDom.textContent = timePassed.timerValue;
+                this.messageTimerDom.title = timePassed.timerTitle;
+            }
             this.setFirstSwipe(messageId);
         }
 
@@ -3184,6 +3223,23 @@ function restoreResponseLength(api, responseLength) {
 }
 
 /**
+ * Removes last message from the chat DOM.
+ * @returns {Promise<void>} Resolves when the message is removed.
+ */
+function removeLastMessage() {
+    return new Promise((resolve) => {
+        const lastMes = $('#chat').children('.mes').last();
+        if (lastMes.length === 0) {
+            return resolve();
+        }
+        lastMes.hide(animation_duration, function () {
+            $(this).remove();
+            resolve();
+        });
+    });
+}
+
+/**
  * Runs a generation using the current chat context.
  * @param {string} type Generation type
  * @param {GenerateOptions} options Generation options
@@ -3315,9 +3371,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
         }
         else if (type !== 'quiet' && type !== 'swipe' && !isImpersonate && !dryRun && chat.length) {
             chat.length = chat.length - 1;
-            $('#chat').children().last().hide(250, function () {
-                $(this).remove();
-            });
+            await removeLastMessage();
             await eventSource.emit(event_types.MESSAGE_DELETED, chat.length);
         }
     }
@@ -3498,7 +3552,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
     // Add WI to prompt (and also inject WI to AN value via hijack)
     // Make quiet prompt available for WIAN
     setExtensionPrompt('QUIET_PROMPT', quiet_prompt || '', extension_prompt_types.IN_PROMPT, 0, true);
-    const chatForWI = coreChat.map(x => `${x.name}: ${x.mes}`).reverse();
+    const chatForWI = coreChat.map(x => world_info_include_names ? `${x.name}: ${x.mes}` : x.mes).reverse();
     const { worldInfoString, worldInfoBefore, worldInfoAfter, worldInfoExamples, worldInfoDepth } = await getWorldInfoPrompt(chatForWI, this_max_context, dryRun);
     setExtensionPrompt('QUIET_PROMPT', '', extension_prompt_types.IN_PROMPT, 0, true);
 
@@ -3565,6 +3619,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
     let chat2 = [];
     let continue_mag = '';
     const userMessageIndices = [];
+    const lastUserMessageIndex = coreChat.findLastIndex(x => x.is_user);
 
     for (let i = coreChat.length - 1, j = 0; i >= 0; i--, j++) {
         if (main_api == 'openai') {
@@ -3581,6 +3636,11 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
         if (j === 0 && isInstruct) {
             // Reformat with the first output sequence (if any)
             chat2[i] = formatMessageHistoryItem(coreChat[j], isInstruct, force_output_sequence.FIRST);
+        }
+
+        if (lastUserMessageIndex >= 0 && j === lastUserMessageIndex && isInstruct) {
+            // Reformat with the last input sequence (if any)
+            chat2[i] = formatMessageHistoryItem(coreChat[j], isInstruct, force_output_sequence.LAST);
         }
 
         // Do not suffix the message for continuation
@@ -3608,7 +3668,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
             mes: power_user.instruct.user_alignment_message,
             is_user: true,
         };
-        userAlignmentMessage = formatMessageHistoryItem(alignmentMessage, isInstruct, false);
+        userAlignmentMessage = formatMessageHistoryItem(alignmentMessage, isInstruct, force_output_sequence.FIRST);
     }
 
     // Call combined AN into Generate
@@ -4176,6 +4236,8 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
             summarizeString: (extension_prompts['1_memory']?.value || ''),
             authorsNoteString: (extension_prompts['2_floating_prompt']?.value || ''),
             smartContextString: (extension_prompts['chromadb']?.value || ''),
+            chatVectorsString: (extension_prompts['3_vectors']?.value || ''),
+            dataBankVectorsString: (extension_prompts['4_vectors_data_bank']?.value || ''),
             worldInfoString: worldInfoString,
             storyString: storyString,
             beforeScenarioAnchor: beforeScenarioAnchor,
@@ -4378,6 +4440,25 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
         streamingProcessor = null;
         throw exception;
     }
+}
+
+/**
+ * Stops the generation and any streaming if it is currently running.
+ */
+export function stopGeneration() {
+    let stopped = false;
+    if (streamingProcessor) {
+        streamingProcessor.onStopStreaming();
+        streamingProcessor = null;
+        stopped = true;
+    }
+    if (abortController) {
+        abortController.abort('Clicked stop button');
+        hideStopButton();
+        stopped = true;
+    }
+    eventSource.emit(event_types.GENERATION_STOPPED);
+    return stopped;
 }
 
 /**
@@ -4661,6 +4742,7 @@ export async function sendMessageAsUser(messageText, messageBias, insertAt = nul
         await eventSource.emit(event_types.MESSAGE_SENT, chat_id);
         addOneMessage(message);
         await eventSource.emit(event_types.USER_MESSAGE_RENDERED, chat_id);
+        await saveChatConditional();
     }
 }
 
@@ -4788,6 +4870,8 @@ export async function itemizedParams(itemizedPrompts, thisPromptSet) {
         thisPrompt_padding: itemizedPrompts[thisPromptSet].padding,
         this_main_api: itemizedPrompts[thisPromptSet].main_api,
         chatInjects: await getTokenCountAsync(itemizedPrompts[thisPromptSet].chatInjects),
+        chatVectorsStringTokens: await getTokenCountAsync(itemizedPrompts[thisPromptSet].chatVectorsString),
+        dataBankVectorsStringTokens: await getTokenCountAsync(itemizedPrompts[thisPromptSet].dataBankVectorsString),
     };
 
     if (params.chatInjects) {
@@ -4884,6 +4968,9 @@ export function findItemizedPromptSet(itemizedPrompts, incomingMesId) {
             PromptArrayItemForRawPromptDisplay = i;
             console.log(`wanting to raw display of ArrayItem: ${PromptArrayItemForRawPromptDisplay} which is mesID ${incomingMesId}`);
             console.log(itemizedPrompts[thisPromptSet]);
+            break;
+        } else if (itemizedPrompts[i].rawPrompt) {
+            priorPromptArrayItemForRawPromptDisplay = i;
         }
     }
     return thisPromptSet;
@@ -4902,6 +4989,7 @@ async function promptItemize(itemizedPrompts, requestedMesId) {
     }
 
     const params = await itemizedParams(itemizedPrompts, thisPromptSet);
+    const flatten = (rawPrompt) => Array.isArray(rawPrompt) ? rawPrompt.map(x => x.content).join('\n') : rawPrompt;
 
     const template = params.this_main_api == 'openai'
         ? await renderTemplateAsync('itemizationChat', params)
@@ -4909,6 +4997,32 @@ async function promptItemize(itemizedPrompts, requestedMesId) {
 
     const popup = new Popup(template, POPUP_TYPE.TEXT);
 
+    /** @type {HTMLElement} */
+    const diffPrevPrompt = popup.dlg.querySelector('#diffPrevPrompt');
+    if (priorPromptArrayItemForRawPromptDisplay) {
+        diffPrevPrompt.style.display = '';
+        diffPrevPrompt.addEventListener('click', function () {
+            const dmp = new diff_match_patch();
+            const text1 = flatten(itemizedPrompts[priorPromptArrayItemForRawPromptDisplay].rawPrompt);
+            const text2 = flatten(itemizedPrompts[PromptArrayItemForRawPromptDisplay].rawPrompt);
+
+            dmp.Diff_Timeout = 2.0;
+
+            const d = dmp.diff_main(text1, text2);
+            let ds = dmp.diff_prettyHtml(d);
+            // make it readable
+            ds = ds.replaceAll('background:#e6ffe6;', 'background:#b9f3b9; color:black;');
+            ds = ds.replaceAll('background:#ffe6e6;', 'background:#f5b4b4; color:black;');
+            ds = ds.replaceAll('&para;', '');
+            const container = document.createElement('div');
+            container.innerHTML = DOMPurify.sanitize(ds);
+            const rawPromptWrapper = document.getElementById('rawPromptWrapper');
+            rawPromptWrapper.replaceChildren(container);
+            $('#rawPromptPopup').slideToggle();
+        });
+    } else {
+        diffPrevPrompt.style.display = 'none';
+    }
     popup.dlg.querySelector('#copyPromptToClipboard').addEventListener('click', function () {
         let rawPrompt = itemizedPrompts[PromptArrayItemForRawPromptDisplay].rawPrompt;
         let rawPromptValues = rawPrompt;
@@ -4927,16 +5041,11 @@ async function promptItemize(itemizedPrompts, requestedMesId) {
         console.log(itemizedPrompts);
         console.log(itemizedPrompts[PromptArrayItemForRawPromptDisplay].rawPrompt);
 
-        let rawPrompt = itemizedPrompts[PromptArrayItemForRawPromptDisplay].rawPrompt;
-        let rawPromptValues = rawPrompt;
-
-        if (Array.isArray(rawPrompt)) {
-            rawPromptValues = rawPrompt.map(x => x.content).join('\n');
-        }
+        const rawPrompt = flatten(itemizedPrompts[PromptArrayItemForRawPromptDisplay].rawPrompt);
 
         //let DisplayStringifiedPrompt = JSON.stringify(itemizedPrompts[PromptArrayItemForRawPromptDisplay].rawPrompt).replace(/\n+/g, '<br>');
         const rawPromptWrapper = document.getElementById('rawPromptWrapper');
-        rawPromptWrapper.innerText = rawPromptValues;
+        rawPromptWrapper.innerText = rawPrompt;
         $('#rawPromptPopup').slideToggle();
     });
 
@@ -4998,6 +5107,10 @@ async function sendGenerationRequest(type, data) {
  * @returns {Promise<any>} Streaming generator
  */
 async function sendStreamingRequest(type, data) {
+    if (abortController?.signal?.aborted) {
+        throw new Error('Generation was aborted.');
+    }
+
     switch (main_api) {
         case 'openai':
             return await sendOpenAIRequest(type, data.prompt, streamingProcessor.abortController.signal);
@@ -5954,9 +6067,10 @@ async function getChatResult() {
         const message = getFirstMessage();
         if (message.mes) {
             chat.push(message);
-            await saveChatConditional();
             freshChat = true;
         }
+        // Make sure the chat appears on the server
+        await saveChatConditional();
     }
     await loadItemizedPrompts(getCurrentChatId());
     await printMessages();
@@ -6008,7 +6122,7 @@ export async function openCharacterChat(file_name) {
     chat_metadata = {};
     await getChat();
     $('#selected_chat_pole').val(file_name);
-    await createOrEditCharacter();
+    await createOrEditCharacter(new CustomEvent('newChat'));
 }
 
 ////////// OPTIMZED MAIN API CHANGE FUNCTION ////////////
@@ -6088,7 +6202,7 @@ export function changeMainAPI() {
     }
 
     if (selectedVal === 'textgenerationwebui' || selectedVal === 'novel') {
-        console.log('enabling amount_gen for ooba/novel');
+        console.debug('enabling amount_gen for ooba/novel');
         activeItem.amountGenElem.find('input').prop('disabled', false);
         activeItem.amountGenElem.css('opacity', 1.0);
     }
@@ -6710,6 +6824,11 @@ export async function displayPastChats() {
             const fileName = chat['file_name'];
             const chatContent = rawChats[fileName];
 
+            // Make sure empty chats are displayed when there is no search query
+            if (Array.isArray(chatContent) && !chatContent.length && !searchQuery) {
+                return true;
+            }
+
             // // Uncomment this to return to old behavior (classical full-substring search).
             // return chatContent && Object.values(chatContent).some(message => message?.mes?.toLowerCase()?.includes(searchQuery.toLowerCase()));
 
@@ -7130,20 +7249,23 @@ function updateFavButtonState(state) {
     $('#favorite_button').toggleClass('fav_off', !fav_ch_checked);
 }
 
-export function setScenarioOverride() {
+export async function setScenarioOverride() {
     if (!selected_group && !this_chid) {
         console.warn('setScenarioOverride() -- no selected group or character');
         return;
     }
 
-    const template = $('#scenario_override_template .scenario_override').clone();
     const metadataValue = chat_metadata['scenario'] || '';
     const isGroup = !!selected_group;
-    template.find('[data-group="true"]').toggle(isGroup);
-    template.find('[data-character="true"]').toggle(!isGroup);
-    template.find('.chat_scenario').val(metadataValue).on('input', onScenarioOverrideInput);
-    template.find('.remove_scenario_override').on('click', onScenarioOverrideRemoveClick);
-    callPopup(template, 'text');
+
+    const $template = $(await renderTemplateAsync('scenarioOverride'));
+    $template.find('[data-group="true"]').toggle(isGroup);
+    $template.find('[data-character="true"]').toggle(!isGroup);
+    // TODO: Why does this save on every character input? Save on popup close
+    $template.find('.chat_scenario').val(metadataValue).on('input', onScenarioOverrideInput);
+    $template.find('.remove_scenario_override').on('click', onScenarioOverrideRemoveClick);
+
+    await callGenericPopup($template, POPUP_TYPE.TEXT, '');
 }
 
 function onScenarioOverrideInput() {
@@ -7163,7 +7285,8 @@ function onScenarioOverrideRemoveClick() {
  * @param {string} inputValue - Value to set the input to.
  * @param {PopupOptions} options - Options for the popup.
  * @typedef {{okButton?: string, rows?: number, wide?: boolean, wider?: boolean, large?: boolean, allowHorizontalScrolling?: boolean, allowVerticalScrolling?: boolean, cropAspect?: number }} PopupOptions - Options for the popup.
- * @returns
+ * @returns {Promise<any>} A promise that resolves when the popup is closed.
+ * @deprecated Use `callGenericPopup` instead.
  */
 export function callPopup(text, type, inputValue = '', { okButton, rows, wide, wider, large, allowHorizontalScrolling, allowVerticalScrolling, cropAspect } = {}) {
     function getOkButtonText() {
@@ -7794,6 +7917,7 @@ window['SillyTavern'].getContext = function () {
         eventTypes: event_types,
         addOneMessage: addOneMessage,
         generate: Generate,
+        stopGeneration: stopGeneration,
         getTokenCount: getTokenCount,
         extensionPrompts: extension_prompts,
         setExtensionPrompt: setExtensionPrompt,
@@ -7808,22 +7932,23 @@ window['SillyTavern'].getContext = function () {
         saveReply,
         substituteParams,
         substituteParamsExtended,
+        SlashCommandParser,
+        executeSlashCommandsWithOptions,
+        /** @deprecated Use SlashCommandParser.addCommandObject() instead */
         registerSlashCommand: registerSlashCommand,
+        /** @deprecated Use executeSlashCommandWithOptions instead */
         executeSlashCommands: executeSlashCommands,
         timestampToMoment: timestampToMoment,
-        /**
-         * @deprecated Handlebars for extensions are no longer supported.
-         */
+        /** @deprecated Handlebars for extensions are no longer supported. */
         registerHelper: () => { },
         registerMacro: MacrosParser.registerMacro.bind(MacrosParser),
         unregisterMacro: MacrosParser.unregisterMacro.bind(MacrosParser),
         registedDebugFunction: registerDebugFunction,
-        /**
-         * @deprecated Use renderExtensionTemplateAsync instead.
-         */
+        /** @deprecated Use renderExtensionTemplateAsync instead. */
         renderExtensionTemplate: renderExtensionTemplate,
         renderExtensionTemplateAsync: renderExtensionTemplateAsync,
         registerDataBankScraper: ScraperManager.registerDataBankScraper,
+        /** @deprecated Use callGenericPopup or Popup instead. */
         callPopup: callPopup,
         callGenericPopup: callGenericPopup,
         showLoader: showLoader,
@@ -7845,10 +7970,11 @@ window['SillyTavern'].getContext = function () {
         tagMap: tag_map,
         menuType: menu_type,
         createCharacterData: create_save,
-        /**
-         * @deprecated Legacy snake-case naming, compatibility with old extensions
-         */
+        /** @deprecated Legacy snake-case naming, compatibility with old extensions */
         event_types: event_types,
+        Popup: Popup,
+        POPUP_TYPE: POPUP_TYPE,
+        POPUP_RESULT: POPUP_RESULT,
     };
 };
 
@@ -8184,6 +8310,7 @@ const swipe_right = () => {
 };
 
 const CONNECT_API_MAP = {
+    // Default APIs not contined inside text gen / chat gen
     'kobold': {
         selected: 'kobold',
         button: '#api_button',
@@ -8195,147 +8322,48 @@ const CONNECT_API_MAP = {
         selected: 'novel',
         button: '#api_button_novel',
     },
-    'ooba': {
-        selected: 'textgenerationwebui',
-        button: '#api_button_textgenerationwebui',
-        type: textgen_types.OOBA,
-    },
-    'tabby': {
-        selected: 'textgenerationwebui',
-        button: '#api_button_textgenerationwebui',
-        type: textgen_types.TABBY,
-    },
-    'llamacpp': {
-        selected: 'textgenerationwebui',
-        button: '#api_button_textgenerationwebui',
-        type: textgen_types.LLAMACPP,
-    },
-    'ollama': {
-        selected: 'textgenerationwebui',
-        button: '#api_button_textgenerationwebui',
-        type: textgen_types.OLLAMA,
-    },
-    'mancer': {
-        selected: 'textgenerationwebui',
-        button: '#api_button_textgenerationwebui',
-        type: textgen_types.MANCER,
-    },
-    'vllm': {
-        selected: 'textgenerationwebui',
-        button: '#api_button_textgenerationwebui',
-        type: textgen_types.VLLM,
-    },
-    'aphrodite': {
-        selected: 'textgenerationwebui',
-        button: '#api_button_textgenerationwebui',
-        type: textgen_types.APHRODITE,
-    },
-    'koboldcpp': {
-        selected: 'textgenerationwebui',
-        button: '#api_button_textgenerationwebui',
-        type: textgen_types.KOBOLDCPP,
-    },
+    // KoboldCpp alias
     'kcpp': {
         selected: 'textgenerationwebui',
         button: '#api_button_textgenerationwebui',
         type: textgen_types.KOBOLDCPP,
     },
-    'togetherai': {
-        selected: 'textgenerationwebui',
-        button: '#api_button_textgenerationwebui',
-        type: textgen_types.TOGETHERAI,
-    },
-    'openai': {
-        selected: 'openai',
-        button: '#api_button_openai',
-        source: chat_completion_sources.OPENAI,
-    },
+    // OpenAI alias
     'oai': {
         selected: 'openai',
         button: '#api_button_openai',
         source: chat_completion_sources.OPENAI,
     },
-    'claude': {
-        selected: 'openai',
-        button: '#api_button_openai',
-        source: chat_completion_sources.CLAUDE,
-    },
-    'windowai': {
-        selected: 'openai',
-        button: '#api_button_openai',
-        source: chat_completion_sources.WINDOWAI,
-    },
+    // OpenRouter special naming, to differentiate between chat comp and text comp
     'openrouter': {
         selected: 'openai',
         button: '#api_button_openai',
         source: chat_completion_sources.OPENROUTER,
-    },
-    'scale': {
-        selected: 'openai',
-        button: '#api_button_openai',
-        source: chat_completion_sources.SCALE,
-    },
-    'ai21': {
-        selected: 'openai',
-        button: '#api_button_openai',
-        source: chat_completion_sources.AI21,
-    },
-    'makersuite': {
-        selected: 'openai',
-        button: '#api_button_openai',
-        source: chat_completion_sources.MAKERSUITE,
-    },
-    'mistralai': {
-        selected: 'openai',
-        button: '#api_button_openai',
-        source: chat_completion_sources.MISTRALAI,
-    },
-    'custom': {
-        selected: 'openai',
-        button: '#api_button_openai',
-        source: chat_completion_sources.CUSTOM,
-    },
-    'cohere': {
-        selected: 'openai',
-        button: '#api_button_openai',
-        source: chat_completion_sources.COHERE,
-    },
-    'perplexity': {
-        selected: 'openai',
-        button: '#api_button_openai',
-        source: chat_completion_sources.PERPLEXITY,
-    },
-    'groq': {
-        selected: 'openai',
-        button: '#api_button_openai',
-        source: chat_completion_sources.GROQ,
-    },
-    '01ai': {
-        selected: 'openai',
-        button: '#api_button_openai',
-        source: chat_completion_sources.ZEROONEAI,
-    },
-    'infermaticai': {
-        selected: 'textgenerationwebui',
-        button: '#api_button_textgenerationwebui',
-        type: textgen_types.INFERMATICAI,
-    },
-    'dreamgen': {
-        selected: 'textgenerationwebui',
-        button: '#api_button_textgenerationwebui',
-        type: textgen_types.DREAMGEN,
     },
     'openrouter-text': {
         selected: 'textgenerationwebui',
         button: '#api_button_textgenerationwebui',
         type: textgen_types.OPENROUTER,
     },
-    'huggingface': {
+};
+
+// Fill connections map from textgen_types and chat_completion_sources
+for (const textGenType of Object.values(textgen_types)) {
+    if (CONNECT_API_MAP[textGenType]) continue;
+    CONNECT_API_MAP[textGenType] = {
         selected: 'textgenerationwebui',
         button: '#api_button_textgenerationwebui',
-        type: textgen_types.HUGGINGFACE,
-    },
-};
+        type: textGenType,
+    };
+}
+for (const chatCompletionSource of Object.values(chat_completion_sources)) {
+    if (CONNECT_API_MAP[chatCompletionSource]) continue;
+    CONNECT_API_MAP[chatCompletionSource] = {
+        selected: 'openai',
+        button: '#api_button_openai',
+        source: chatCompletionSource,
+    };
+}
 
 async function selectContextCallback(_, name) {
     if (!name) {
@@ -8886,14 +8914,6 @@ API Settings: ${JSON.stringify(getSettingsContents[getSettingsContents.main_api 
 }
 
 jQuery(async function () {
-
-    if (isMobile()) {
-        console.debug('hiding movingUI and sheldWidth toggles for mobile');
-        $('#sheldWidthToggleBlock').hide();
-        $('#movingUIModeCheckBlock').hide();
-
-    }
-
     async function doForceSave() {
         await saveSettings();
         await saveChatConditional();
@@ -9068,10 +9088,6 @@ jQuery(async function () {
         $('#groupCurrentMemberListToggle .inline-drawer-icon').trigger('click');
     }, 200);
 
-    $('#chat').on('wheel touchstart', () => {
-        scrollLock = true;
-    });
-
     $(document).on('click', '.api_loading', cancelStatusCheck);
 
     //////////INPUT BAR FOCUS-KEEPING LOGIC/////////////
@@ -9176,23 +9192,46 @@ jQuery(async function () {
      */
     function autoFitEditTextArea(e) {
         scroll_holder = chatElement[0].scrollTop;
-        e.style.height = '0';
-        e.style.height = `${e.scrollHeight + 4}px`;
+        e.style.height = '0px';
+        const newHeight = e.scrollHeight + 4;
+        e.style.height = `${newHeight}px`;
         is_use_scroll_holder = true;
     }
     const autoFitEditTextAreaDebounced = debounce(autoFitEditTextArea, debounce_timeout.short);
     document.addEventListener('input', e => {
         if (e.target instanceof HTMLTextAreaElement && e.target.classList.contains('edit_textarea')) {
-            const immediately = e.target.scrollHeight > e.target.offsetHeight || e.target.value === '';
+            const scrollbarShown = e.target.clientWidth < e.target.offsetWidth && e.target.offsetHeight >= window.innerHeight * 0.75;
+            const immediately = (e.target.scrollHeight > e.target.offsetHeight && !scrollbarShown) || e.target.value === '';
             immediately ? autoFitEditTextArea(e.target) : autoFitEditTextAreaDebounced(e.target);
         }
     });
-    document.getElementById('chat').addEventListener('scroll', function () {
+    const chatElementScroll = document.getElementById('chat');
+    const chatScrollHandler = function () {
+        if (power_user.waifuMode) {
+            scrollLock = true;
+            return;
+        }
+
+        const scrollIsAtBottom = Math.abs(chatElementScroll.scrollHeight - chatElementScroll.clientHeight - chatElementScroll.scrollTop) < 1;
+
+        // Resume autoscroll if the user scrolls to the bottom
+        if (scrollLock && scrollIsAtBottom) {
+            scrollLock = false;
+        }
+
+        // Cancel autoscroll if the user scrolls up
+        if (!scrollLock && !scrollIsAtBottom) {
+            scrollLock = true;
+        }
+    };
+    chatElementScroll.addEventListener('wheel', chatScrollHandler, { passive: true });
+    chatElementScroll.addEventListener('touchmove', chatScrollHandler, { passive: true });
+    chatElementScroll.addEventListener('scroll', function () {
         if (is_use_scroll_holder) {
             this.scrollTop = scroll_holder;
             is_use_scroll_holder = false;
         }
-    });
+    }, { passive: true });
 
     $(document).on('click', '.mes', function () {
         //when a 'delete message' parent div is clicked
@@ -9720,8 +9759,8 @@ jQuery(async function () {
         hideMenu();
     });
 
-    $('#newChatFromManageScreenButton').on('click', function () {
-        doNewChat({ deleteCurrentChat: false });
+    $('#newChatFromManageScreenButton').on('click', async function () {
+        await doNewChat({ deleteCurrentChat: false });
         $('#select_chat_cross').trigger('click');
     });
 
@@ -9743,7 +9782,7 @@ jQuery(async function () {
     });
 
     //confirms message deletion with the "ok" button
-    $('#dialogue_del_mes_ok').click(async function () {
+    $('#dialogue_del_mes_ok').on('click', async function () {
         $('#dialogue_del_mes').css('display', 'none');
         $('#send_form').css('display', css_send_form_display);
         $('.del_checkbox').each(function () {
@@ -9759,7 +9798,7 @@ jQuery(async function () {
             chat.length = this_del_mes;
             await saveChatConditional();
             chatElement.scrollTop(chatElement[0].scrollHeight);
-            eventSource.emit(event_types.MESSAGE_DELETED, chat.length);
+            await eventSource.emit(event_types.MESSAGE_DELETED, chat.length);
             $('#chat .mes').removeClass('last_mes');
             $('#chat .mes').last().addClass('last_mes');
         } else {
@@ -10342,15 +10381,7 @@ jQuery(async function () {
     });
 
     $(document).on('click', '.mes_stop', function () {
-        if (streamingProcessor) {
-            streamingProcessor.onStopStreaming();
-            streamingProcessor = null;
-        }
-        if (abortController) {
-            abortController.abort('Clicked stop button');
-            hideStopButton();
-        }
-        eventSource.emit(event_types.GENERATION_STOPPED);
+        stopGeneration();
     });
 
     $(document).on('click', '#form_sheld .stscript_continue', function () {
@@ -10598,7 +10629,7 @@ jQuery(async function () {
                 openCharacterWorldPopup();
                 break;
             case 'set_chat_scenario':
-                setScenarioOverride();
+                await setScenarioOverride();
                 break;
             case 'renameCharButton':
                 renameCharacter();
@@ -10619,7 +10650,7 @@ jQuery(async function () {
                 const source = getCharacterSource(this_chid);
                 if (source && isValidUrl(source)) {
                     const url = new URL(source);
-                    const confirm = await callPopup(`Open ${url.hostname} in a new tab?`, 'confirm');
+                    const confirm = await Popup.show.confirm('Open Source', `<span>Do you want to open the link to ${url.hostname} in a new tab?</span><var>${url}</var>`);
                     if (confirm) {
                         window.open(source, '_blank');
                     }
@@ -10628,7 +10659,7 @@ jQuery(async function () {
                 }
             } break;
             case 'replace_update': {
-                const confirm = await callPopup('<p><b>Choose a new character card to replace this character with.</b></p><p>All chats, assets and group memberships will be preserved, but local changes to the character data will be lost.</p><p>Proceed?</p>', 'confirm', '');
+                const confirm = await Popup.show.confirm('Replace Character', '<p>Choose a new character card to replace this character with.</p>All chats, assets and group memberships will be preserved, but local changes to the character data will be lost.<br />Proceed?');
                 if (confirm) {
                     async function uploadReplacementCard(e) {
                         const file = e.target.files[0];
@@ -10701,7 +10732,7 @@ jQuery(async function () {
                         //newSlider.val(manualInput)
                         //handleSlideEvent.call(newSlider, null, { value: parseFloat(manualInput) }, 'manual');
                         valueBeforeManualInput = manualInput;
-                        $(masterElement).val($(this).val()).trigger('input');
+                        $(masterElement).val($(this).val()).trigger('input', { forced: true });
                     } else {
                         //if value not ok, warn and reset to last known valid value
                         toastr.warning(`Invalid value. Must be between ${$(this).attr('min')} and ${$(this).attr('max')}`);
@@ -10727,7 +10758,7 @@ jQuery(async function () {
                 if (manualInput >= Number($(this).attr('min')) && manualInput <= Number($(this).attr('max'))) {
                     valueBeforeManualInput = manualInput;
                     //set the slider value to input value
-                    $(masterElement).val($(this).val()).trigger('input');
+                    $(masterElement).val($(this).val()).trigger('input', { forced: true });
                 } else {
                     //if value not ok, warn and reset to last known valid value
                     toastr.warning(`Invalid value. Must be between ${$(this).attr('min')} and ${$(this).attr('max')}`);
@@ -10839,3 +10870,4 @@ jQuery(async function () {
 
     initCustomSelectedSamplers();
 });
+
