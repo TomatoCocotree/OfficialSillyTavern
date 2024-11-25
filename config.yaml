@@ -14,8 +14,8 @@ whitelist:
   - 127.0.0.1
 basicAuthMode: ture
 basicAuthUser:
-  username: "qqezseer"
-  password: "guoguo4399"
+  username: process.env.username
+  password: process.env.password
 enableCorsProxy: false
 requestProxy:
   enabled: false
