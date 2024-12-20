@@ -280,7 +280,7 @@ async function sendMakerSuiteRequest(request, response) {
             delete generationConfig.stopSequences;
         }
 
-        const should_use_system_prompt = (model.includes('gemini-1.5-flash') || model.includes('gemini-1.5-pro') || model.includes('gemini-exp-1114') || model.includes('gemini-exp-1121')) && request.body.use_makersuite_sysprompt;
+        const should_use_system_prompt = (model.includes('gemini-1.5-flash') || model.includes('gemini-1.5-pro') || model.startsWith('gemini-exp')) && request.body.use_makersuite_sysprompt;
         const prompt = convertGooglePrompt(request.body.messages, model, should_use_system_prompt, request.body.char_name, request.body.user_name);
         let body = {
             contents: prompt.contents,
@@ -891,7 +891,7 @@ router.post('/generate', jsonParser, function (request, response) {
         }
 
         let cachingAtDepth = getConfigValue('claude.cachingAtDepth', -1);
-        if (Number.isInteger(cachingAtDepth) && cachingAtDepth >= 0 && request.body.model.startsWith('anthropic/claude-3')) {
+        if (Number.isInteger(cachingAtDepth) && cachingAtDepth >= 0 && request.body.model?.startsWith('anthropic/claude-3')) {
             cachingAtDepthForOpenRouterClaude(request.body.messages, cachingAtDepth);
         }
     } else if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.CUSTOM) {
