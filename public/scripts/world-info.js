@@ -20,6 +20,8 @@ import { SlashCommandClosure } from './slash-commands/SlashCommandClosure.js';
 import { callGenericPopup, Popup, POPUP_TYPE } from './popup.js';
 import { StructuredCloneMap } from './util/StructuredCloneMap.js';
 import { renderTemplateAsync } from './templates.js';
+import { t } from './i18n.js';
+import { accountStorage } from './util/AccountStorage.js';
 
 export const world_info_insertion_strategy = {
     evenly: 0,
@@ -399,6 +401,12 @@ class WorldInfoTimedEffects {
     #entries = [];
 
     /**
+     * Is this a dry run?
+     * @type {boolean}
+     */
+    #isDryRun = false;
+
+    /**
      * Buffer for active timed effects.
      * @type {Record<TimedEffectType, WIScanEntry[]>}
      */
@@ -447,10 +455,12 @@ class WorldInfoTimedEffects {
      * Initialize the timed effects with the given messages.
      * @param {string[]} chat Array of chat messages
      * @param {WIScanEntry[]} entries Array of entries
+     * @param {boolean} isDryRun Whether the operation is a dry run
      */
-    constructor(chat, entries) {
+    constructor(chat, entries, isDryRun = false) {
         this.#chat = chat;
         this.#entries = entries;
+        this.#isDryRun = isDryRun;
         this.#ensureChatMetadata();
     }
 
@@ -582,8 +592,10 @@ class WorldInfoTimedEffects {
      * Checks for timed effects on chat messages.
      */
     checkTimedEffects() {
-        this.#checkTimedEffectOfType('sticky', this.#buffer.sticky, this.#onEnded.sticky.bind(this));
-        this.#checkTimedEffectOfType('cooldown', this.#buffer.cooldown, this.#onEnded.cooldown.bind(this));
+        if (!this.#isDryRun) {
+            this.#checkTimedEffectOfType('sticky', this.#buffer.sticky, this.#onEnded.sticky.bind(this));
+            this.#checkTimedEffectOfType('cooldown', this.#buffer.cooldown, this.#onEnded.cooldown.bind(this));
+        }
         this.#checkDelayEffect(this.#buffer.delay);
     }
 
@@ -628,6 +640,7 @@ class WorldInfoTimedEffects {
      * @param {WIScanEntry[]} activatedEntries Entries that were activated
      */
     setTimedEffects(activatedEntries) {
+        if (this.#isDryRun) return;
         for (const entry of activatedEntries) {
             this.#setTimedEffectOfType('sticky', entry);
             this.#setTimedEffectOfType('cooldown', entry);
@@ -642,6 +655,9 @@ class WorldInfoTimedEffects {
      */
     setTimedEffect(type, entry, newState) {
         if (!this.isValidEffectType(type)) {
+            return;
+        }
+        if (this.#isDryRun && type !== 'delay') {
             return;
         }
 
@@ -857,7 +873,7 @@ export function setWorldInfoSettings(settings, data) {
         $('#world_editor_select').append(`<option value='${i}'>${item}</option>`);
     });
 
-    $('#world_info_sort_order').val(localStorage.getItem(SORT_ORDER_KEY) || '0');
+    $('#world_info_sort_order').val(accountStorage.getItem(SORT_ORDER_KEY) || '0');
     $('#world_info').trigger('change');
     $('#world_editor_select').trigger('change');
 
@@ -909,21 +925,21 @@ function registerWorldInfoSlashCommands() {
 
     async function getEntriesFromFile(file) {
         if (!file || !world_names.includes(file)) {
-            toastr.warning('Valid World Info file name is required');
+            toastr.warning(t`Valid World Info file name is required`);
             return '';
         }
 
         const data = await loadWorldInfo(file);
 
         if (!data || !('entries' in data)) {
-            toastr.warning('World Info file has an invalid format');
+            toastr.warning(t`World Info file has an invalid format`);
             return '';
         }
 
         const entries = Object.values(data.entries);
 
         if (!entries || entries.length === 0) {
-            toastr.warning('World Info file has no entries');
+            toastr.warning(t`World Info file has no entries`);
             return '';
         }
 
@@ -951,7 +967,7 @@ function registerWorldInfoSlashCommands() {
         name = String(name ?? '') || context.characters[context.characterId]?.avatar || null;
         const character = findChar({ name });
         if (!character) {
-            toastr.error('Character not found.');
+            toastr.error(t`Character not found.`);
             return '';
         }
         const books = [];
@@ -977,7 +993,7 @@ function registerWorldInfoSlashCommands() {
         const chatId = getCurrentChatId();
 
         if (!chatId) {
-            toastr.warning('Open a chat to get a name of the chat-bound lorebook');
+            toastr.warning(t`Open a chat to get a name of the chat-bound lorebook`);
             return '';
         }
 
@@ -1707,7 +1723,7 @@ export async function loadWorldInfo(name) {
     return null;
 }
 
-async function updateWorldInfoList() {
+export async function updateWorldInfoList() {
     const result = await fetch('/api/settings/get', {
         method: 'POST',
         headers: getRequestHeaders(),
@@ -1932,13 +1948,13 @@ function displayWorldEntries(name, data, navigation = navigation_option.none, fl
     if (typeof navigation === 'number' && Number(navigation) >= 0) {
         const data = getDataArray();
         const uidIndex = data.findIndex(x => x.uid === navigation);
-        const perPage = Number(localStorage.getItem(storageKey)) || perPageDefault;
+        const perPage = Number(accountStorage.getItem(storageKey)) || perPageDefault;
         startPage = Math.floor(uidIndex / perPage) + 1;
     }
 
     $('#world_info_pagination').pagination({
         dataSource: getDataArray,
-        pageSize: Number(localStorage.getItem(storageKey)) || perPageDefault,
+        pageSize: Number(accountStorage.getItem(storageKey)) || perPageDefault,
         sizeChangerOptions: [10, 25, 50, 100, 500, 1000],
         showSizeChanger: true,
         pageRange: 1,
@@ -1968,7 +1984,7 @@ function displayWorldEntries(name, data, navigation = navigation_option.none, fl
             worldEntriesList.append(blocks);
         },
         afterSizeSelectorChange: function (e) {
-            localStorage.setItem(storageKey, e.target.value);
+            accountStorage.setItem(storageKey, e.target.value);
         },
         afterPaging: function () {
             $('#world_popup_entries_list textarea[name="comment"]').each(function () {
@@ -2173,7 +2189,7 @@ function verifyWorldInfoSearchSortRule() {
     // If search got cleared, we make sure to hide the option and go back to the one before
     if (!searchTerm && !isHidden) {
         searchOption.attr('hidden', '');
-        selector.val(localStorage.getItem(SORT_ORDER_KEY) || '0');
+        selector.val(accountStorage.getItem(SORT_ORDER_KEY) || '0');
     }
 }
 
@@ -2422,7 +2438,9 @@ export async function getWorldEntry(name, data, entry) {
                     setWIOriginalDataValue(data, uid, originalDataValueName, data.entries[uid][entryPropName]);
                     await saveWorldInfo(name, data);
                 }
+                $(this).toggleClass('empty', !data.entries[uid][entryPropName].length);
             });
+            input.toggleClass('empty', !entry[entryPropName].length);
             input.on('select2:select', /** @type {function(*):void} */ event => updateWorldEntryKeyOptionsCache([event.params.data]));
             input.on('select2:unselect', /** @type {function(*):void} */ event => updateWorldEntryKeyOptionsCache([event.params.data], { remove: true }));
 
@@ -2457,6 +2475,7 @@ export async function getWorldEntry(name, data, entry) {
                     data.entries[uid][entryPropName] = splitKeywordsAndRegexes(value);
                     setWIOriginalDataValue(data, uid, originalDataValueName, data.entries[uid][entryPropName]);
                     await saveWorldInfo(name, data);
+                    $(this).toggleClass('empty', !data.entries[uid][entryPropName].length);
                 }
             });
             input.val(entry[entryPropName].join(', ')).trigger('input', { skipReset: true });
@@ -3434,7 +3453,7 @@ async function _save(name, data) {
         headers: getRequestHeaders(),
         body: JSON.stringify({ name: name, data: data }),
     });
-    eventSource.emit(event_types.WORLDINFO_UPDATED, name, data);
+    await eventSource.emit(event_types.WORLDINFO_UPDATED, name, data);
 }
 
 
@@ -3846,7 +3865,7 @@ export async function checkWorldInfo(chat, maxContext, isDryRun) {
     const context = getContext();
     const buffer = new WorldInfoBuffer(chat);
 
-    console.debug(`[WI] --- START WI SCAN (on ${chat.length} messages) ---`);
+    console.debug(`[WI] --- START WI SCAN (on ${chat.length} messages)${isDryRun ? ' (DRY RUN)' : ''} ---`);
 
     // Combine the chat
 
@@ -3878,9 +3897,9 @@ export async function checkWorldInfo(chat, maxContext, isDryRun) {
 
     console.debug(`[WI] Context size: ${maxContext}; WI budget: ${budget} (max% = ${world_info_budget}%, cap = ${world_info_budget_cap})`);
     const sortedEntries = await getSortedEntries();
-    const timedEffects = new WorldInfoTimedEffects(chat, sortedEntries);
+    const timedEffects = new WorldInfoTimedEffects(chat, sortedEntries, isDryRun);
 
-    !isDryRun && timedEffects.checkTimedEffects();
+    timedEffects.checkTimedEffects();
 
     if (sortedEntries.length === 0) {
         return { worldInfoBefore: '', worldInfoAfter: '', WIDepthEntries: [], EMEntries: [], allActivatedEntries: new Set() };
@@ -4323,12 +4342,12 @@ export async function checkWorldInfo(chat, maxContext, isDryRun) {
         context.setExtensionPrompt(NOTE_MODULE_NAME, ANWithWI, chat_metadata[metadata_keys.position], chat_metadata[metadata_keys.depth], extension_settings.note.allowWIScan, chat_metadata[metadata_keys.role]);
     }
 
-    !isDryRun && timedEffects.setTimedEffects(Array.from(allActivatedEntries.values()));
+    timedEffects.setTimedEffects(Array.from(allActivatedEntries.values()));
     buffer.resetExternalEffects();
     timedEffects.cleanUp();
 
-    console.log(`[WI] Adding ${allActivatedEntries.size} entries to prompt`, Array.from(allActivatedEntries.values()));
-    console.debug('[WI] --- DONE ---');
+    console.log(`[WI] ${isDryRun ? 'Hypothetically adding' : 'Adding'} ${allActivatedEntries.size} entries to prompt`, Array.from(allActivatedEntries.values()));
+    console.debug(`[WI] --- DONE${isDryRun ? ' (DRY RUN)' : ''} ---`);
 
     return { worldInfoBefore, worldInfoAfter, EMEntries, WIDepthEntries, allActivatedEntries: new Set(allActivatedEntries.values()) };
 }
@@ -4657,7 +4676,7 @@ function convertNovelLorebook(inputObj) {
     return outputObj;
 }
 
-function convertCharacterBook(characterBook) {
+export function convertCharacterBook(characterBook) {
     const result = { entries: {}, originalData: characterBook };
 
     characterBook.entries.forEach((entry, index) => {
@@ -4735,8 +4754,8 @@ export function checkEmbeddedWorld(chid) {
         // Only show the alert once per character
         const checkKey = `AlertWI_${characters[chid].avatar}`;
         const worldName = characters[chid]?.data?.extensions?.world;
-        if (!localStorage.getItem(checkKey) && (!worldName || !world_names.includes(worldName))) {
-            localStorage.setItem(checkKey, 'true');
+        if (!accountStorage.getItem(checkKey) && (!worldName || !world_names.includes(worldName))) {
+            accountStorage.setItem(checkKey, 'true');
 
             if (power_user.world_import_dialog) {
                 const html = `<h3>This character has an embedded World/Lorebook.</h3>
@@ -4773,7 +4792,7 @@ export async function importEmbeddedWorldInfo(skipPopup = false) {
     const bookName = characters[chid]?.data?.character_book?.name || `${characters[chid]?.name}'s Lorebook`;
 
     if (!skipPopup) {
-        const confirmation = await Popup.show.confirm(`Are you sure you want to import "${bookName}"?`, world_names.includes(bookName) ? 'It will overwrite the World/Lorebook with the same name.' : '');
+        const confirmation = await Popup.show.confirm(t`Are you sure you want to import '${bookName}'?`, world_names.includes(bookName) ? t`It will overwrite the World/Lorebook with the same name.` : '');
         if (!confirmation) {
             return;
         }
@@ -4785,7 +4804,7 @@ export async function importEmbeddedWorldInfo(skipPopup = false) {
     await updateWorldInfoList();
     $('#character_world').val(bookName).trigger('change');
 
-    toastr.success(`The world "${bookName}" has been imported and linked to the character successfully.`, 'World/Lorebook imported');
+    toastr.success(t`The world '${bookName}' has been imported and linked to the character successfully.`, t`World/Lorebook imported`);
 
     const newIndex = world_names.indexOf(bookName);
     if (newIndex >= 0) {
@@ -4813,9 +4832,9 @@ export function onWorldInfoChange(args, text) {
                             if (selected_world_info.includes(name)) {
                                 selected_world_info.splice(selected_world_info.indexOf(name), 1);
                                 wiElement.prop('selected', false);
-                                if (!silent) toastr.success(`Deactivated world: ${name}`);
+                                if (!silent) toastr.success(t`Deactivated world: ${name}`);
                             } else {
-                                if (!silent) toastr.error(`World was not active: ${name}`);
+                                if (!silent) toastr.error(t`World was not active: ${name}`);
                             }
                             break;
                         }
@@ -4823,11 +4842,11 @@ export function onWorldInfoChange(args, text) {
                             if (selected_world_info.includes(name)) {
                                 selected_world_info.splice(selected_world_info.indexOf(name), 1);
                                 wiElement.prop('selected', false);
-                                if (!silent) toastr.success(`Deactivated world: ${name}`);
+                                if (!silent) toastr.success(t`Deactivated world: ${name}`);
                             } else {
                                 selected_world_info.push(name);
                                 wiElement.prop('selected', true);
-                                if (!silent) toastr.success(`Activated world: ${name}`);
+                                if (!silent) toastr.success(t`Activated world: ${name}`);
                             }
                             break;
                         }
@@ -4835,16 +4854,16 @@ export function onWorldInfoChange(args, text) {
                         default: {
                             selected_world_info.push(name);
                             wiElement.prop('selected', true);
-                            if (!silent) toastr.success(`Activated world: ${name}`);
+                            if (!silent) toastr.success(t`Activated world: ${name}`);
                         }
                     }
                 } else {
-                    if (!silent) toastr.error(`No world found named: ${worldName}`);
+                    if (!silent) toastr.error(t`No world found named: ${worldName}`);
                 }
             });
             $('#world_info').trigger('change');
         } else { // if no args, unset all worlds
-            if (!silent) toastr.success('Deactivated all worlds');
+            if (!silent) toastr.success(t`Deactivated all worlds`);
             selected_world_info = [];
             $('#world_info').val(null).trigger('change');
         }
@@ -4860,7 +4879,7 @@ export function onWorldInfoChange(args, text) {
                 } else {
                     const wiElement = getWIElement(existingWorldName);
                     wiElement.prop('selected', false);
-                    toastr.error(`The world with ${existingWorldName} is invalid or corrupted.`);
+                    toastr.error(t`The world with ${existingWorldName} is invalid or corrupted.`);
                 }
             });
         }
@@ -4892,7 +4911,7 @@ export async function importWorldInfo(file) {
         }
 
         if (jsonData === undefined || jsonData === null) {
-            toastr.error(`File is not valid: ${file.name}`);
+            toastr.error(t`File is not valid: ${file.name}`);
             return;
         }
 
@@ -5038,7 +5057,7 @@ jQuery(() => {
 
     $('#world_create_button').on('click', async () => {
         const tempName = getFreeWorldName();
-        const finalName = await Popup.show.input('Create a new World Info', 'Enter a name for the new file:', tempName);
+        const finalName = await Popup.show.input(t`Create a new World Info`, t`Enter a name for the new file:`, tempName);
 
         if (finalName) {
             await createNewWorldInfo(finalName, { interactive: true });
@@ -5180,7 +5199,7 @@ jQuery(() => {
     $('#world_info_sort_order').on('change', function () {
         const value = String($(this).find(':selected').val());
         // Save sort order, but do not save search sorting, as this is a temporary sorting option
-        if (value !== 'search') localStorage.setItem(SORT_ORDER_KEY, value);
+        if (value !== 'search') accountStorage.setItem(SORT_ORDER_KEY, value);
         updateEditor(navigation_option.none);
     });
 

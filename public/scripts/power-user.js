@@ -54,6 +54,7 @@ import { commonEnumProviders, enumIcons } from './slash-commands/SlashCommandCom
 import { POPUP_TYPE, callGenericPopup } from './popup.js';
 import { loadSystemPrompts } from './sysprompt.js';
 import { fuzzySearchCategories } from './filters.js';
+import { accountStorage } from './util/AccountStorage.js';
 
 export {
     loadPowerUserSettings,
@@ -251,6 +252,17 @@ let power_user = {
         enabled: true,
         name: 'Neutral - Chat',
         content: 'Write {{char}}\'s next reply in a fictional chat between {{char}} and {{user}}.',
+    },
+
+    reasoning: {
+        auto_parse: false,
+        add_to_prompts: false,
+        auto_expand: false,
+        show_hidden: false,
+        prefix: '<think>\n',
+        suffix: '\n</think>',
+        separator: '\n\n',
+        max_additions: 1,
     },
 
     personas: {},
@@ -1313,9 +1325,7 @@ function applyTheme(name) {
             if (type) applyThemeColor(type);
             if (action) action();
         } else {
-            if (selector) { $(selector).attr('color', 'rgba(0,0,0,0)'); }
             console.debug(`Empty theme key: ${key}`);
-            power_user[key] = '';
         }
     }
 
@@ -2011,7 +2021,7 @@ export function renderStoryString(params) {
  */
 function validateStoryString(storyString, params) {
     /** @type {{hashCache: {[hash: string]: {fieldsWarned: {[key: string]: boolean}}}}} */
-    const cache = JSON.parse(localStorage.getItem(storage_keys.storyStringValidationCache)) ?? { hashCache: {} };
+    const cache = JSON.parse(accountStorage.getItem(storage_keys.storyStringValidationCache)) ?? { hashCache: {} };
 
     const hash = getStringHash(storyString);
 
@@ -2048,7 +2058,7 @@ function validateStoryString(storyString, params) {
         toastr.warning(`The story string does not contain the following fields, but they would contain content: ${fieldsList}`, 'Story String Validation');
     }
 
-    localStorage.setItem(storage_keys.storyStringValidationCache, JSON.stringify(cache));
+    accountStorage.setItem(storage_keys.storyStringValidationCache, JSON.stringify(cache));
 }
 
 
@@ -2096,12 +2106,10 @@ export function sortEntitiesList(entities, forceSearch, filterHelper = null) {
     }
 
     entities.sort((a, b) => {
-        // Sort tags/folders will always be at the top
-        if (a.type === 'tag' && b.type !== 'tag') {
-            return -1;
-        }
-        if (a.type !== 'tag' && b.type === 'tag') {
-            return 1;
+        // Sort tags/folders will always be at the top. Their original sorting will be kept, to respect manual tag sorting.
+        if (a.type === 'tag' || b.type === 'tag') {
+            // The one that is a tag will be at the top
+            return (a.type === 'tag' ? -1 : 1) - (b.type === 'tag' ? -1 : 1);
         }
 
         // If we have search sorting, we take scores and use those
@@ -2445,7 +2453,7 @@ async function resetMovablePanels(type) {
     }
 
     saveSettingsDebounced();
-    eventSource.emit(event_types.MOVABLE_PANELS_RESET);
+    await eventSource.emit(event_types.MOVABLE_PANELS_RESET);
 
     eventSource.once(event_types.SETTINGS_UPDATED, () => {
         $('.resizing').removeClass('resizing');
@@ -2538,7 +2546,7 @@ async function loadUntilMesId(mesId) {
     let target;
 
     while (getFirstDisplayedMessageId() > mesId && getFirstDisplayedMessageId() !== 0) {
-        showMoreMessages();
+        await showMoreMessages();
         await delay(1);
         target = $('#chat').find(`.mes[mesid=${mesId}]`);
 
@@ -2910,6 +2918,46 @@ export function flushEphemeralStoppingStrings() {
 
     console.debug('Flushing ephemeral stopping strings:', EPHEMERAL_STOPPING_STRINGS);
     EPHEMERAL_STOPPING_STRINGS.splice(0, EPHEMERAL_STOPPING_STRINGS.length);
+}
+
+/**
+ * Checks if the generated text should be filtered based on the auto-swipe settings.
+ * @param {string} text The text to check
+ * @returns {boolean} If the generated text should be filtered
+ */
+export function generatedTextFiltered(text) {
+    /**
+     * Checks if the given text contains any of the blacklisted words.
+     * @param {string} text The text to check
+     * @param {string[]} blacklist The list of blacklisted words
+     * @param {number} threshold The number of blacklisted words that need to be present to trigger the check
+     * @returns {boolean} Whether the text contains blacklisted words
+     */
+    function containsBlacklistedWords(text, blacklist, threshold) {
+        const regex = new RegExp(`\\b(${blacklist.join('|')})\\b`, 'gi');
+        const matches = text.match(regex) || [];
+        return matches.length >= threshold;
+    }
+
+    // Make sure a generated text is non-empty
+    // Otherwise we might get in a loop with a broken API
+    text = text.trim();
+    if (text.length > 0) {
+        if (power_user.auto_swipe_minimum_length) {
+            if (text.length < power_user.auto_swipe_minimum_length) {
+                console.log('Generated text size too small');
+                return true;
+            }
+        }
+        if (power_user.auto_swipe_blacklist.length && power_user.auto_swipe_blacklist_threshold) {
+            if (containsBlacklistedWords(text, power_user.auto_swipe_blacklist, power_user.auto_swipe_blacklist_threshold)) {
+                console.log('Generated text has blacklisted words');
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 /**
@@ -3883,9 +3931,9 @@ $(document).ready(() => {
         helpString: 'Start a new chat with a random character. If an argument is provided, only considers characters that have the specified tag.',
     }));
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
-        name: 'delmode',
+        name: 'del',
         callback: doDelMode,
-        aliases: ['del'],
+        aliases: ['delete', 'delmode'],
         unnamedArgumentList: [
             new SlashCommandArgument(
                 'optional number', [ARGUMENT_TYPE.NUMBER], false,
@@ -3967,6 +4015,95 @@ $(document).ready(() => {
     `,
     }));
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+        name: 'css-var',
+        /** @param {{to: string, varname: string }} args @param {string} value @returns {string} */
+        callback: (args, value) => {
+            // Map enum to target selector
+            const targetSelector = {
+                chat: '#chat',
+                background: '#bg1',
+                gallery: '#gallery',
+                zoomedAvatar: 'div.zoomed_avatar',
+            }[args.to || 'chat'];
+
+            if (!targetSelector) {
+                toastr.error(`Invalid target: ${args.to}`);
+                return;
+            }
+
+            if (!args.varname) {
+                toastr.error('CSS variable name is required');
+                return;
+            }
+            if (!args.varname.startsWith('--')) {
+                toastr.error('CSS variable names must start with "--"');
+                return;
+            }
+
+            const elements = document.querySelectorAll(targetSelector);
+            if (elements.length === 0) {
+                toastr.error(`No elements found for ${args.to ?? 'chat'} with selector "${targetSelector}"`);
+                return;
+            }
+
+            elements.forEach(element => {
+                element.style.setProperty(args.varname, value);
+            });
+
+            console.info(`Set CSS variable "${args.varname}" to "${value}" on "${targetSelector}"`);
+        },
+        namedArgumentList: [
+            SlashCommandNamedArgument.fromProps({
+                name: 'varname',
+                description: 'CSS variable name (starting with double dashes)',
+                typeList: [ARGUMENT_TYPE.STRING],
+                isRequired: true,
+            }),
+            SlashCommandNamedArgument.fromProps({
+                name: 'to',
+                description: 'The target element to which the CSS variable will be applied',
+                typeList: [ARGUMENT_TYPE.STRING],
+                enumList: [
+                    new SlashCommandEnumValue('chat', null, enumTypes.enum, enumIcons.message),
+                    new SlashCommandEnumValue('background', null, enumTypes.enum, enumIcons.image),
+                    new SlashCommandEnumValue('zoomedAvatar', null, enumTypes.enum, enumIcons.character),
+                    new SlashCommandEnumValue('gallery', null, enumTypes.enum, enumIcons.image),
+                ],
+                defaultValue: 'chat',
+            }),
+        ],
+        unnamedArgumentList: [
+            SlashCommandArgument.fromProps({
+                description: 'CSS variable value',
+                typeList: [ARGUMENT_TYPE.STRING],
+                isRequired: true,
+            }),
+        ],
+        helpString: `
+            <div>
+                Sets a CSS variable to a specified value on a target element.
+                <br />
+                Only setting of variable names is supported. They have to be prefixed with double dashes ("--exampleVar").
+                Setting actual CSS properties is not supported. Custom CSS in the theme settings can be used for that.
+                <br /><br />
+                <b>This value will be gone after a page reload!</b>
+            </div>
+            <div>
+                <strong>Example:</strong>
+                <ul>
+                    <li>
+                        <pre><code>/css-var varname="--SmartThemeBodyColor" #ff0000</code></pre>
+                        Sets the text color of the chat to red
+                    </li>
+                    <li>
+                        <pre><code>/css-var to=zoomedAvatar varname="--SmartThemeBlurStrength" 0</code></pre>
+                        Remove the blur from the zoomed avatar
+                    </li>
+                </ul>
+            </div>
+        `,
+    }));
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
         name: 'movingui',
         callback: setmovingUIPreset,
         unnamedArgumentList: [
@@ -3978,5 +4115,46 @@ $(document).ready(() => {
             }),
         ],
         helpString: 'activates a movingUI preset by name',
+    }));
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+        name: 'stop-strings',
+        aliases: ['stopping-strings', 'custom-stopping-strings', 'custom-stop-strings'],
+        helpString: `
+            <div>
+                Sets a list of custom stopping strings. Gets the list if no value is provided.
+            </div>
+            <div>
+                <strong>Examples:</strong>
+            </div>
+            <ul>
+                <li>Value must be a JSON-serialized array: <pre><code class="language-stscript">/stop-strings ["goodbye", "farewell"]</code></pre></li>
+                <li>Pipe characters must be escaped with a backslash: <pre><code class="language-stscript">/stop-strings ["left\\|right"]</code></pre></li>
+            </ul>
+        `,
+        returns: ARGUMENT_TYPE.LIST,
+        unnamedArgumentList: [
+            SlashCommandArgument.fromProps({
+                description: 'list of strings',
+                typeList: [ARGUMENT_TYPE.LIST],
+                acceptsMultiple: false,
+                isRequired: false,
+            }),
+        ],
+        callback: (_, value) => {
+            if (String(value ?? '').trim()) {
+                const parsedValue = ((x) => { try { return JSON.parse(x.toString()); } catch { return null; } })(value);
+                if (!parsedValue || !Array.isArray(parsedValue)) {
+                    throw new Error('Invalid list format. The value must be a JSON-serialized array of strings.');
+                }
+                parsedValue.forEach((item, index) => {
+                    parsedValue[index] = String(item);
+                });
+                power_user.custom_stopping_strings = JSON.stringify(parsedValue);
+                $('#custom_stopping_strings').val(power_user.custom_stopping_strings);
+                saveSettingsDebounced();
+            }
+
+            return power_user.custom_stopping_strings;
+        },
     }));
 });
