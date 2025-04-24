@@ -2,7 +2,6 @@ import process from 'node:process';
 import express from 'express';
 import fetch from 'node-fetch';
 
-import { jsonParser } from '../../express-common.js';
 import {
     CHAT_COMPLETION_SOURCES,
     GEMINI_SAFETY,
@@ -24,10 +23,12 @@ import {
     convertCohereMessages,
     convertMistralMessages,
     convertAI21Messages,
+    convertXAIMessages,
     mergeMessages,
     cachingAtDepthForOpenRouterClaude,
     cachingAtDepthForClaude,
     getPromptNames,
+    calculateBudgetTokens,
 } from '../../prompt-converters.js';
 
 import { readSecret, SECRET_KEYS } from '../secrets.js';
@@ -49,11 +50,11 @@ const API_COHERE_V2 = 'https://api.cohere.ai/v2';
 const API_PERPLEXITY = 'https://api.perplexity.ai';
 const API_GROQ = 'https://api.groq.com/openai/v1';
 const API_MAKERSUITE = 'https://generativelanguage.googleapis.com';
-const API_01AI = 'https://api.01.ai/v1';
-const API_BLOCKENTROPY = 'https://api.blockentropy.ai/v1';
+const API_01AI = 'https://api.lingyiwanwu.com/v1';
 const API_AI21 = 'https://api.ai21.com/studio/v1';
 const API_NANOGPT = 'https://nano-gpt.com/api/v1';
 const API_DEEPSEEK = 'https://api.deepseek.com/beta';
+const API_XAI = 'https://api.x.ai/v1';
 
 /**
  * Applies a post-processing step to the generated messages.
@@ -98,6 +99,21 @@ function getOpenRouterTransforms(request) {
 }
 
 /**
+ * Gets OpenRouter plugins based on the request.
+ * @param {import('express').Request} request
+ * @returns {any[]} OpenRouter plugins
+ */
+function getOpenRouterPlugins(request) {
+    const plugins = [];
+
+    if (request.body.enable_web_search) {
+        plugins.push({ 'id': 'web' });
+    }
+
+    return plugins;
+}
+
+/**
  * Sends a request to Claude API.
  * @param {express.Request} request Express request
  * @param {express.Response} response Express response
@@ -106,8 +122,8 @@ async function sendClaudeRequest(request, response) {
     const apiUrl = new URL(request.body.reverse_proxy || API_CLAUDE).toString();
     const apiKey = request.body.reverse_proxy ? request.body.proxy_password : readSecret(request.user.directories, SECRET_KEYS.CLAUDE);
     const divider = '-'.repeat(process.stdout.columns);
-    const enableSystemPromptCache = getConfigValue('claude.enableSystemPromptCache', false) && request.body.model.startsWith('claude-3');
-    let cachingAtDepth = getConfigValue('claude.cachingAtDepth', -1);
+    const enableSystemPromptCache = getConfigValue('claude.enableSystemPromptCache', false, 'boolean') && request.body.model.startsWith('claude-3');
+    let cachingAtDepth = getConfigValue('claude.cachingAtDepth', -1, 'number');
     // Disabled if not an integer or negative, or if the model doesn't support it
     if (!Number.isInteger(cachingAtDepth) || cachingAtDepth < 0 || !request.body.model.startsWith('claude-3')) {
         cachingAtDepth = -1;
@@ -125,9 +141,12 @@ async function sendClaudeRequest(request, response) {
             controller.abort();
         });
         const additionalHeaders = {};
+        const betaHeaders = ['output-128k-2025-02-19'];
         const useTools = request.body.model.startsWith('claude-3') && Array.isArray(request.body.tools) && request.body.tools.length > 0;
         const useSystemPrompt = (request.body.model.startsWith('claude-2') || request.body.model.startsWith('claude-3')) && request.body.claude_use_sysprompt;
         const convertedPrompt = convertClaudeMessages(request.body.messages, request.body.assistant_prefill, useSystemPrompt, useTools, getPromptNames(request));
+        const useThinking = request.body.model.startsWith('claude-3-7') && Boolean(request.body.include_reasoning);
+        let voidPrefill = false;
         // Add custom stop sequences
         const stopSequences = [];
         if (Array.isArray(request.body.stop)) {
@@ -155,16 +174,16 @@ async function sendClaudeRequest(request, response) {
             delete requestBody.system;
         }
         if (useTools) {
-            additionalHeaders['anthropic-beta'] = 'tools-2024-05-16';
+            betaHeaders.push('tools-2024-05-16');
             requestBody.tool_choice = { type: request.body.tool_choice };
             requestBody.tools = request.body.tools
                 .filter(tool => tool.type === 'function')
                 .map(tool => tool.function)
                 .map(fn => ({ name: fn.name, description: fn.description, input_schema: fn.parameters }));
 
-            // Claude doesn't do prefills on function calls, and doesn't allow empty messages
-            if (requestBody.tools.length && convertedPrompt.messages.length && convertedPrompt.messages[convertedPrompt.messages.length - 1].role === 'assistant') {
-                convertedPrompt.messages.push({ role: 'user', content: [{ type: 'text', text: '\u200b' }] });
+            if (requestBody.tools.length) {
+                // No prefill when using tools
+                voidPrefill = true;
             }
             if (enableSystemPromptCache && requestBody.tools.length) {
                 requestBody.tools[requestBody.tools.length - 1]['cache_control'] = { type: 'ephemeral' };
@@ -176,7 +195,38 @@ async function sendClaudeRequest(request, response) {
         }
 
         if (enableSystemPromptCache || cachingAtDepth !== -1) {
-            additionalHeaders['anthropic-beta'] = 'prompt-caching-2024-07-31';
+            betaHeaders.push('prompt-caching-2024-07-31');
+        }
+
+        if (useThinking) {
+            // No prefill when thinking
+            voidPrefill = true;
+            const reasoningEffort = request.body.reasoning_effort;
+            const budgetTokens = calculateBudgetTokens(requestBody.max_tokens, reasoningEffort, requestBody.stream);
+            const minThinkTokens = 1024;
+            if (requestBody.max_tokens <= minThinkTokens) {
+                const newValue = requestBody.max_tokens + minThinkTokens;
+                console.warn(color.yellow(`Claude thinking requires a minimum of ${minThinkTokens} response tokens.`));
+                console.info(color.blue(`Increasing response length to ${newValue}.`));
+                requestBody.max_tokens = newValue;
+            }
+            requestBody.thinking = {
+                type: 'enabled',
+                budget_tokens: budgetTokens,
+            };
+
+            // NO I CAN'T SILENTLY IGNORE THE TEMPERATURE.
+            delete requestBody.temperature;
+            delete requestBody.top_p;
+            delete requestBody.top_k;
+        }
+
+        if (voidPrefill && convertedPrompt.messages.length && convertedPrompt.messages[convertedPrompt.messages.length - 1].role === 'assistant') {
+            convertedPrompt.messages.push({ role: 'user', content: [{ type: 'text', text: '\u200b' }] });
+        }
+
+        if (betaHeaders.length) {
+            additionalHeaders['anthropic-beta'] = betaHeaders.join(',');
         }
 
         console.debug('Claude request:', requestBody);
@@ -200,7 +250,7 @@ async function sendClaudeRequest(request, response) {
             if (!generateResponse.ok) {
                 const generateResponseText = await generateResponse.text();
                 console.warn(color.red(`Claude API returned error: ${generateResponse.status} ${generateResponse.statusText}\n${generateResponseText}\n${divider}`));
-                return response.status(generateResponse.status).send({ error: true });
+                return response.status(500).send({ error: true });
             }
 
             /** @type {any} */
@@ -288,7 +338,10 @@ async function sendMakerSuiteRequest(request, response) {
 
     const model = String(request.body.model);
     const stream = Boolean(request.body.stream);
+    const enableWebSearch = Boolean(request.body.enable_web_search);
+    const requestImages = Boolean(request.body.request_images);
     const isThinking = model.includes('thinking');
+    const isGemma = model.includes('gemma');
 
     const generationConfig = {
         stopSequences: request.body.stop,
@@ -297,6 +350,8 @@ async function sendMakerSuiteRequest(request, response) {
         temperature: request.body.temperature,
         topP: request.body.top_p,
         topK: request.body.top_k || undefined,
+        responseMimeType: request.body.responseMimeType,
+        responseSchema: request.body.responseSchema,
     };
 
     function getGeminiBody() {
@@ -304,7 +359,14 @@ async function sendMakerSuiteRequest(request, response) {
             delete generationConfig.stopSequences;
         }
 
-        const should_use_system_prompt = (
+        const useMultiModal = requestImages && ['gemini-2.0-flash-exp', 'gemini-2.0-flash-exp-image-generation'].includes(model);
+        if (useMultiModal) {
+            generationConfig.responseModalities = ['text', 'image'];
+        }
+
+        const useSystemPrompt = !useMultiModal && (
+            model.includes('gemini-2.5-pro') ||
+            model.includes('gemini-2.5-flash') ||
             model.includes('gemini-2.0-pro') ||
             model.includes('gemini-2.0-flash') ||
             model.includes('gemini-2.0-flash-thinking-exp') ||
@@ -313,18 +375,42 @@ async function sendMakerSuiteRequest(request, response) {
             model.startsWith('gemini-exp')
         ) && request.body.use_makersuite_sysprompt;
 
-        const prompt = convertGooglePrompt(request.body.messages, model, should_use_system_prompt, getPromptNames(request));
+        const tools = [];
+        const prompt = convertGooglePrompt(request.body.messages, model, useSystemPrompt, getPromptNames(request));
         let safetySettings = GEMINI_SAFETY;
 
-        // These old models do not support setting the threshold to OFF at all.
-        if (['gemini-1.5-pro-001', 'gemini-1.5-flash-001', 'gemini-1.5-flash-8b-exp-0827', 'gemini-1.5-flash-8b-exp-0924', 'gemini-pro', 'gemini-1.0-pro', 'gemini-1.0-pro-001'].includes(model)) {
+        // These models do not support setting the threshold to OFF at all.
+        if (['gemini-1.5-pro-001', 'gemini-1.5-flash-001', 'gemini-1.5-flash-8b-exp-0827', 'gemini-1.5-flash-8b-exp-0924', 'gemini-pro', 'gemini-1.0-pro', 'gemini-1.0-pro-001', 'gemma-3-27b-it'].includes(model)) {
             safetySettings = GEMINI_SAFETY.map(setting => ({ ...setting, threshold: 'BLOCK_NONE' }));
         }
         // Interestingly, Gemini 2.0 Flash does support setting the threshold for HARM_CATEGORY_CIVIC_INTEGRITY to OFF.
-        else if (['gemini-2.0-flash', 'gemini-2.0-flash-001', 'gemini-2.0-flash-exp'].includes(model)) {
+        else if (['gemini-2.0-flash', 'gemini-2.0-flash-001', 'gemini-2.0-flash-exp', 'gemini-2.0-flash-exp-image-generation'].includes(model)) {
             safetySettings = GEMINI_SAFETY.map(setting => ({ ...setting, threshold: 'OFF' }));
         }
         // Most of the other models allow for setting the threshold of filters, except for HARM_CATEGORY_CIVIC_INTEGRITY, to OFF.
+
+        if (enableWebSearch && !useMultiModal && !isGemma) {
+            const searchTool = model.includes('1.5') || model.includes('1.0')
+                ? ({ google_search_retrieval: {} })
+                : ({ google_search: {} });
+            tools.push(searchTool);
+        }
+
+        if (Array.isArray(request.body.tools) && request.body.tools.length > 0 && !useMultiModal && !isGemma) {
+            const functionDeclarations = [];
+            for (const tool of request.body.tools) {
+                if (tool.type === 'function') {
+                    if (tool.function.parameters?.$schema) {
+                        delete tool.function.parameters.$schema;
+                    }
+                    if (tool.function.parameters?.properties && Object.keys(tool.function.parameters.properties).length === 0) {
+                        delete tool.function.parameters;
+                    }
+                    functionDeclarations.push(tool.function);
+                }
+            }
+            tools.push({ function_declarations: functionDeclarations });
+        }
 
         let body = {
             contents: prompt.contents,
@@ -332,8 +418,12 @@ async function sendMakerSuiteRequest(request, response) {
             generationConfig: generationConfig,
         };
 
-        if (should_use_system_prompt) {
+        if (useSystemPrompt) {
             body.systemInstruction = prompt.system_instruction;
+        }
+
+        if (tools.length) {
+            body.tools = tools;
         }
 
         return body;
@@ -374,7 +464,7 @@ async function sendMakerSuiteRequest(request, response) {
         } else {
             if (!generateResponse.ok) {
                 console.warn(`Google AI Studio API returned error: ${generateResponse.status} ${generateResponse.statusText} ${await generateResponse.text()}`);
-                return response.status(generateResponse.status).send({ error: true });
+                return response.status(500).send({ error: true });
             }
 
             /** @type {any} */
@@ -391,10 +481,12 @@ async function sendMakerSuiteRequest(request, response) {
             }
 
             const responseContent = candidates[0].content ?? candidates[0].output;
+            const functionCall = (candidates?.[0]?.content?.parts ?? []).some(part => part.functionCall);
+            const inlineData = (candidates?.[0]?.content?.parts ?? []).some(part => part.inlineData);
             console.warn('Google AI Studio response:', responseContent);
 
             const responseText = typeof responseContent === 'string' ? responseContent : responseContent?.parts?.filter(part => !part.thought)?.map(part => part.text)?.join('\n\n');
-            if (!responseText) {
+            if (!responseText && !functionCall && !inlineData) {
                 let message = 'Google AI Studio Candidate text empty';
                 console.warn(message, generateResponseJson);
                 return response.send({ error: { message } });
@@ -420,6 +512,12 @@ async function sendMakerSuiteRequest(request, response) {
 async function sendAI21Request(request, response) {
     if (!request.body) return response.sendStatus(400);
 
+    const apiKey = readSecret(request.user.directories, SECRET_KEYS.AI21);
+    if (!apiKey) {
+        console.warn('AI21 API key is missing.');
+        return response.status(400).send({ error: true });
+    }
+
     const controller = new AbortController();
     console.debug(request.body.messages);
     request.socket.removeAllListeners('close');
@@ -435,13 +533,14 @@ async function sendAI21Request(request, response) {
         top_p: request.body.top_p,
         stop: request.body.stop,
         stream: request.body.stream,
+        tools: request.body.tools,
     };
     const options = {
         method: 'POST',
         headers: {
             accept: 'application/json',
             'content-type': 'application/json',
-            Authorization: `Bearer ${readSecret(request.user.directories, SECRET_KEYS.AI21)}`,
+            Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify(body),
         signal: controller.signal,
@@ -507,6 +606,7 @@ async function sendMistralAIRequest(request, response) {
             'stream': request.body.stream,
             'safe_prompt': request.body.safe_prompt,
             'random_seed': request.body.seed === -1 ? undefined : request.body.seed,
+            'stop': Array.isArray(request.body.stop) && request.body.stop.length > 0 ? request.body.stop : undefined,
         };
 
         if (Array.isArray(request.body.tools) && request.body.tools.length > 0) {
@@ -731,10 +831,104 @@ async function sendDeepSeekRequest(request, response) {
     }
 }
 
+/**
+ * Sends a request to XAI API.
+ * @param {express.Request} request Express request
+ * @param {express.Response} response Express response
+ */
+async function sendXaiRequest(request, response) {
+    const apiUrl = new URL(request.body.reverse_proxy || API_XAI).toString();
+    const apiKey = request.body.reverse_proxy ? request.body.proxy_password : readSecret(request.user.directories, SECRET_KEYS.XAI);
+
+    if (!apiKey && !request.body.reverse_proxy) {
+        console.warn('xAI API key is missing.');
+        return response.status(400).send({ error: true });
+    }
+
+    const controller = new AbortController();
+    request.socket.removeAllListeners('close');
+    request.socket.on('close', function () {
+        controller.abort();
+    });
+
+    try {
+        let bodyParams = {};
+
+        if (request.body.logprobs > 0) {
+            bodyParams['top_logprobs'] = request.body.logprobs;
+            bodyParams['logprobs'] = true;
+        }
+
+        if (Array.isArray(request.body.tools) && request.body.tools.length > 0) {
+            bodyParams['tools'] = request.body.tools;
+            bodyParams['tool_choice'] = request.body.tool_choice;
+        }
+
+        if (Array.isArray(request.body.stop) && request.body.stop.length > 0) {
+            bodyParams['stop'] = request.body.stop;
+        }
+
+        if (['grok-3-mini-beta', 'grok-3-mini-fast-beta'].includes(request.body.model)) {
+            bodyParams['reasoning_effort'] = request.body.reasoning_effort === 'high' ? 'high' : 'low';
+        }
+
+        const processedMessages = request.body.messages = convertXAIMessages(request.body.messages, getPromptNames(request));
+
+        const requestBody = {
+            'messages': processedMessages,
+            'model': request.body.model,
+            'temperature': request.body.temperature,
+            'max_tokens': request.body.max_tokens,
+            'max_completion_tokens': request.body.max_completion_tokens,
+            'stream': request.body.stream,
+            'presence_penalty': request.body.presence_penalty,
+            'frequency_penalty': request.body.frequency_penalty,
+            'top_p': request.body.top_p,
+            'seed': request.body.seed,
+            'n': request.body.n,
+            ...bodyParams,
+        };
+
+        const config = {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + apiKey,
+            },
+            body: JSON.stringify(requestBody),
+            signal: controller.signal,
+        };
+
+        console.debug('xAI request:', requestBody);
+
+        const generateResponse = await fetch(apiUrl + '/chat/completions', config);
+
+        if (request.body.stream) {
+            forwardFetchResponse(generateResponse, response);
+        } else {
+            if (!generateResponse.ok) {
+                const errorText = await generateResponse.text();
+                console.warn(`xAI API returned error: ${generateResponse.status} ${generateResponse.statusText} ${errorText}`);
+                const errorJson = tryParse(errorText) ?? { error: true };
+                return response.status(500).send(errorJson);
+            }
+            const generateResponseJson = await generateResponse.json();
+            console.debug('xAI response:', generateResponseJson);
+            return response.send(generateResponseJson);
+        }
+    } catch (error) {
+        console.error('Error communicating with xAI API: ', error);
+        if (!response.headersSent) {
+            response.send({ error: true });
+        } else {
+            response.end();
+        }
+    }
+}
 
 export const router = express.Router();
 
-router.post('/status', jsonParser, async function (request, response_getstatus_openai) {
+router.post('/status', async function (request, response_getstatus_openai) {
     if (!request.body) return response_getstatus_openai.sendStatus(400);
 
     let api_url;
@@ -767,10 +961,6 @@ router.post('/status', jsonParser, async function (request, response_getstatus_o
         api_url = API_01AI;
         api_key_openai = readSecret(request.user.directories, SECRET_KEYS.ZEROONEAI);
         headers = {};
-    } else if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.BLOCKENTROPY) {
-        api_url = API_BLOCKENTROPY;
-        api_key_openai = readSecret(request.user.directories, SECRET_KEYS.BLOCKENTROPY);
-        headers = {};
     } else if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.NANOGPT) {
         api_url = API_NANOGPT;
         api_key_openai = readSecret(request.user.directories, SECRET_KEYS.NANOGPT);
@@ -778,6 +968,10 @@ router.post('/status', jsonParser, async function (request, response_getstatus_o
     } else if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.DEEPSEEK) {
         api_url = new URL(request.body.reverse_proxy || API_DEEPSEEK.replace('/beta', ''));
         api_key_openai = request.body.reverse_proxy ? request.body.proxy_password : readSecret(request.user.directories, SECRET_KEYS.DEEPSEEK);
+        headers = {};
+    } else if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.XAI) {
+        api_url = new URL(request.body.reverse_proxy || API_XAI);
+        api_key_openai = request.body.reverse_proxy ? request.body.proxy_password : readSecret(request.user.directories, SECRET_KEYS.XAI);
         headers = {};
     } else {
         console.warn('This chat completion source is not supported yet.');
@@ -850,7 +1044,7 @@ router.post('/status', jsonParser, async function (request, response_getstatus_o
     }
 });
 
-router.post('/bias', jsonParser, async function (request, response) {
+router.post('/bias', async function (request, response) {
     if (!request.body || !Array.isArray(request.body))
         return response.sendStatus(400);
 
@@ -935,7 +1129,7 @@ router.post('/bias', jsonParser, async function (request, response) {
 });
 
 
-router.post('/generate', jsonParser, function (request, response) {
+router.post('/generate', function (request, response) {
     if (!request.body) return response.status(400).send({ error: true });
 
     switch (request.body.chat_completion_source) {
@@ -946,6 +1140,7 @@ router.post('/generate', jsonParser, function (request, response) {
         case CHAT_COMPLETION_SOURCES.MISTRALAI: return sendMistralAIRequest(request, response);
         case CHAT_COMPLETION_SOURCES.COHERE: return sendCohereRequest(request, response);
         case CHAT_COMPLETION_SOURCES.DEEPSEEK: return sendDeepSeekRequest(request, response);
+        case CHAT_COMPLETION_SOURCES.XAI: return sendXaiRequest(request, response);
     }
 
     let apiUrl;
@@ -953,6 +1148,15 @@ router.post('/generate', jsonParser, function (request, response) {
     let headers;
     let bodyParams;
     const isTextCompletion = Boolean(request.body.model && TEXT_COMPLETION_MODELS.includes(request.body.model)) || typeof request.body.messages === 'string';
+
+    const postProcessTypes = [CHAT_COMPLETION_SOURCES.CUSTOM, CHAT_COMPLETION_SOURCES.OPENROUTER];
+    if (Array.isArray(request.body.messages) && postProcessTypes.includes(request.body.chat_completion_source) && request.body.custom_prompt_post_processing) {
+        console.info('Applying custom prompt post-processing of type', request.body.custom_prompt_post_processing);
+        request.body.messages = postProcessPrompt(
+            request.body.messages,
+            request.body.custom_prompt_post_processing,
+            getPromptNames(request));
+    }
 
     if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.OPENAI) {
         apiUrl = new URL(request.body.reverse_proxy || API_OPENAI).toString();
@@ -969,7 +1173,7 @@ router.post('/generate', jsonParser, function (request, response) {
             bodyParams.logprobs = true;
         }
 
-        if (getConfigValue('openai.randomizeUserId', false)) {
+        if (getConfigValue('openai.randomizeUserId', false, 'boolean')) {
             bodyParams['user'] = uuidv4();
         }
     } else if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.OPENROUTER) {
@@ -979,6 +1183,8 @@ router.post('/generate', jsonParser, function (request, response) {
         headers = { ...OPENROUTER_HEADERS };
         bodyParams = {
             'transforms': getOpenRouterTransforms(request),
+            'plugins': getOpenRouterPlugins(request),
+            'include_reasoning': Boolean(request.body.include_reasoning),
         };
 
         if (request.body.min_p !== undefined) {
@@ -1004,11 +1210,7 @@ router.post('/generate', jsonParser, function (request, response) {
             bodyParams['route'] = 'fallback';
         }
 
-        if (request.body.include_reasoning) {
-            bodyParams['include_reasoning'] = true;
-        }
-
-        let cachingAtDepth = getConfigValue('claude.cachingAtDepth', -1);
+        let cachingAtDepth = getConfigValue('claude.cachingAtDepth', -1, 'number');
         if (Number.isInteger(cachingAtDepth) && cachingAtDepth >= 0 && request.body.model?.startsWith('anthropic/claude-3')) {
             cachingAtDepthForOpenRouterClaude(request.body.messages, cachingAtDepth);
         }
@@ -1029,14 +1231,6 @@ router.post('/generate', jsonParser, function (request, response) {
 
         mergeObjectWithYaml(bodyParams, request.body.custom_include_body);
         mergeObjectWithYaml(headers, request.body.custom_include_headers);
-
-        if (request.body.custom_prompt_post_processing) {
-            console.info('Applying custom prompt post-processing of type', request.body.custom_prompt_post_processing);
-            request.body.messages = postProcessPrompt(
-                request.body.messages,
-                request.body.custom_prompt_post_processing,
-                getPromptNames(request));
-        }
     } else if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.PERPLEXITY) {
         apiUrl = API_PERPLEXITY;
         apiKey = readSecret(request.user.directories, SECRET_KEYS.PERPLEXITY);
@@ -1058,11 +1252,6 @@ router.post('/generate', jsonParser, function (request, response) {
         apiKey = readSecret(request.user.directories, SECRET_KEYS.ZEROONEAI);
         headers = {};
         bodyParams = {};
-    } else if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.BLOCKENTROPY) {
-        apiUrl = API_BLOCKENTROPY;
-        apiKey = readSecret(request.user.directories, SECRET_KEYS.BLOCKENTROPY);
-        headers = {};
-        bodyParams = {};
     } else {
         console.warn('This chat completion source is not supported yet.');
         return response.status(400).send({ error: true });
@@ -1070,7 +1259,7 @@ router.post('/generate', jsonParser, function (request, response) {
 
     // A few of OpenAIs reasoning models support reasoning effort
     if ([CHAT_COMPLETION_SOURCES.CUSTOM, CHAT_COMPLETION_SOURCES.OPENAI].includes(request.body.chat_completion_source)) {
-        if (['o1', 'o3-mini', 'o3-mini-2025-01-31'].includes(request.body.model)) {
+        if (['o1', 'o3-mini', 'o3-mini-2025-01-31', 'o4-mini', 'o4-mini-2025-04-16', 'o3', 'o3-2025-04-16'].includes(request.body.model)) {
             bodyParams['reasoning_effort'] = request.body.reasoning_effort;
         }
     }
@@ -1150,6 +1339,7 @@ router.post('/generate', jsonParser, function (request, response) {
      */
     async function makeRequest(config, response, request, retries = 5, timeout = 5000) {
         try {
+            controller.signal.throwIfAborted();
             const fetchResponse = await fetch(endpointUrl, config);
 
             if (request.body.stream) {

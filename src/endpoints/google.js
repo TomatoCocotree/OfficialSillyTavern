@@ -4,20 +4,19 @@ import express from 'express';
 import { speak, languages } from 'google-translate-api-x';
 
 import { readSecret, SECRET_KEYS } from './secrets.js';
-import { jsonParser } from '../express-common.js';
 import { GEMINI_SAFETY } from '../constants.js';
 
 const API_MAKERSUITE = 'https://generativelanguage.googleapis.com';
 
 export const router = express.Router();
 
-router.post('/caption-image', jsonParser, async (request, response) => {
+router.post('/caption-image', async (request, response) => {
     try {
         const mimeType = request.body.image.split(';')[0].split(':')[1];
         const base64Data = request.body.image.split(',')[1];
         const apiKey = request.body.reverse_proxy ? request.body.proxy_password : readSecret(request.user.directories, SECRET_KEYS.MAKERSUITE);
         const apiUrl = new URL(request.body.reverse_proxy || API_MAKERSUITE);
-        const model = request.body.model || 'gemini-pro-vision';
+        const model = request.body.model || 'gemini-2.0-flash';
         const url = `${apiUrl.origin}/v1beta/models/${model}:generateContent?key=${apiKey}`;
         const body = {
             contents: [{
@@ -31,7 +30,6 @@ router.post('/caption-image', jsonParser, async (request, response) => {
                     }],
             }],
             safetySettings: GEMINI_SAFETY,
-            generationConfig: { maxOutputTokens: 1000 },
         };
 
         console.debug('Multimodal captioning request', model, body);
@@ -47,7 +45,7 @@ router.post('/caption-image', jsonParser, async (request, response) => {
         if (!result.ok) {
             const error = await result.json();
             console.error(`Google AI Studio API returned error: ${result.status} ${result.statusText}`, error);
-            return response.status(result.status).send({ error: true });
+            return response.status(500).send({ error: true });
         }
 
         /** @type {any} */
@@ -75,7 +73,7 @@ router.post('/list-voices', (_, response) => {
     return response.json(languages);
 });
 
-router.post('/generate-voice', jsonParser, async (request, response) => {
+router.post('/generate-voice', async (request, response) => {
     try {
         const text = request.body.text;
         const voice = request.body.voice ?? 'en';

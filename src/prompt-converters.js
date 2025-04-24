@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { getConfigValue } from './util.js';
+import { getConfigValue, tryParse } from './util.js';
 
 const PROMPT_PLACEHOLDER = getConfigValue('promptPlaceholder', 'Let\'s get started.');
 
@@ -360,8 +360,11 @@ export function convertCohereMessages(messages, names) {
  */
 export function convertGooglePrompt(messages, model, useSysPrompt, names) {
     const visionSupportedModels = [
+        'gemini-2.5-pro-preview-03-25',
+        'gemini-2.5-pro-exp-03-25',
         'gemini-2.0-pro-exp',
         'gemini-2.0-pro-exp-02-05',
+        'gemini-2.5-flash-preview-04-17',
         'gemini-2.0-flash-lite-preview',
         'gemini-2.0-flash-lite-preview-02-05',
         'gemini-2.0-flash',
@@ -370,6 +373,7 @@ export function convertGooglePrompt(messages, model, useSysPrompt, names) {
         'gemini-2.0-flash-thinking-exp-01-21',
         'gemini-2.0-flash-thinking-exp-1219',
         'gemini-2.0-flash-exp',
+        'gemini-2.0-flash-exp-image-generation',
         'gemini-1.5-flash',
         'gemini-1.5-flash-latest',
         'gemini-1.5-flash-001',
@@ -410,12 +414,13 @@ export function convertGooglePrompt(messages, model, useSysPrompt, names) {
         }
     }
 
-    const system_instruction = { parts: { text: sys_prompt.trim() } };
+    const system_instruction = { parts: [{ text: sys_prompt.trim() }] };
+    const toolNameMap = {};
 
     const contents = [];
     messages.forEach((message, index) => {
         // fix the roles
-        if (message.role === 'system') {
+        if (message.role === 'system' || message.role === 'tool') {
             message.role = 'user';
         } else if (message.role === 'assistant') {
             message.role = 'model';
@@ -423,7 +428,21 @@ export function convertGooglePrompt(messages, model, useSysPrompt, names) {
 
         // Convert the content to an array of parts
         if (!Array.isArray(message.content)) {
-            message.content = [{ type: 'text', text: String(message.content ?? '') }];
+            const content = (() => {
+                const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
+                const hasToolCallId = typeof message.tool_call_id === 'string' && message.tool_call_id.length > 0;
+
+                if (hasToolCalls) {
+                    return { type: 'tool_calls', tool_calls: message.tool_calls };
+                }
+
+                if (hasToolCallId) {
+                    return { type: 'tool_call_id', tool_call_id: message.tool_call_id, content: String(message.content ?? '') };
+                }
+
+                return { type: 'text', text: String(message.content ?? '') };
+            })();
+            message.content = [content];
         }
 
         // similar story as claude
@@ -455,6 +474,25 @@ export function convertGooglePrompt(messages, model, useSysPrompt, names) {
         message.content.forEach((part) => {
             if (part.type === 'text') {
                 parts.push({ text: part.text });
+            } else if (part.type === 'tool_call_id') {
+                const name = toolNameMap[part.tool_call_id] ?? 'unknown';
+                parts.push({
+                    functionResponse: {
+                        name: name,
+                        response: { name: name, content: part.content },
+                    },
+                });
+            } else if (part.type === 'tool_calls') {
+                part.tool_calls.forEach((toolCall) => {
+                    parts.push({
+                        functionCall: {
+                            name: toolCall.function.name,
+                            args: tryParse(toolCall.function.arguments) ?? toolCall.function.arguments,
+                        },
+                    });
+
+                    toolNameMap[toolCall.id] = toolCall.function.name;
+                });
             } else if (part.type === 'image_url' && isMultimodal) {
                 const mimeType = part.image_url.url.split(';')[0].split(':')[1];
                 const base64Data = part.image_url.url.split(',')[1];
@@ -471,9 +509,14 @@ export function convertGooglePrompt(messages, model, useSysPrompt, names) {
         if (index > 0 && message.role === contents[contents.length - 1].role) {
             parts.forEach((part) => {
                 if (part.text) {
-                    contents[contents.length - 1].parts[0].text += '\n\n' + part.text;
+                    const textPart = contents[contents.length - 1].parts.find(p => typeof p.text === 'string');
+                    if (textPart) {
+                        textPart.text += '\n\n' + part.text;
+                    } else {
+                        contents[contents.length - 1].parts.push(part);
+                    }
                 }
-                if (part.inlineData) {
+                if (part.inlineData || part.functionCall || part.functionResponse) {
                     contents[contents.length - 1].parts.push(part);
                 }
             });
@@ -572,7 +615,7 @@ export function convertMistralMessages(messages, names) {
     }
 
     // Make the last assistant message a prefill
-    const prefixEnabled = getConfigValue('mistral.enablePrefix', false);
+    const prefixEnabled = getConfigValue('mistral.enablePrefix', false, 'boolean');
     const lastMsg = messages[messages.length - 1];
     if (prefixEnabled && messages.length > 0 && lastMsg?.role === 'assistant') {
         lastMsg.prefix = true;
@@ -638,6 +681,43 @@ export function convertMistralMessages(messages, names) {
             messages[i + 1].role = 'user';
         }
     }
+
+    return messages;
+}
+
+/**
+ * Convert a prompt from the messages objects to the format used by xAI.
+ * @param {object[]} messages Array of messages
+ * @param {PromptNames} names Prompt names
+ * @returns {object[]} Prompt for xAI
+ */
+export function convertXAIMessages(messages, names) {
+    if (!Array.isArray(messages)) {
+        return [];
+    }
+
+    messages.forEach(msg => {
+        if (!msg.name || msg.role === 'user') {
+            return;
+        }
+
+        const needsCharNamePrefix = [
+            { role: 'assistant', condition: names.charName && !msg.content.startsWith(`${names.charName}: `) && !names.startsWithGroupName(msg.content) },
+            { role: 'system', name: 'example_assistant', condition: names.charName && !msg.content.startsWith(`${names.charName}: `) && !names.startsWithGroupName(msg.content) },
+            { role: 'system', name: 'example_user', condition: names.userName && !msg.content.startsWith(`${names.userName}: `) },
+        ];
+
+        const matchingRule = needsCharNamePrefix.find(rule =>
+            msg.role === rule.role && (!rule.name || msg.name === rule.name) && rule.condition,
+        );
+
+        if (matchingRule) {
+            const prefix = msg.role === 'system' && msg.name === 'example_user' ? names.userName : names.charName;
+            msg.content = `${prefix}: ${msg.content}`;
+        }
+
+        delete msg.name;
+    });
 
     return messages;
 }
@@ -861,4 +941,35 @@ export function cachingAtDepthForOpenRouterClaude(messages, cachingAtDepth) {
             previousRoleName = messages[i].role;
         }
     }
+}
+
+/**
+ * Calculate the budget tokens for a given reasoning effort.
+ * @param {number} maxTokens Maximum tokens
+ * @param {string} reasoningEffort Reasoning effort
+ * @param {boolean} stream If streaming is enabled
+ * @returns {number} Budget tokens
+ */
+export function calculateBudgetTokens(maxTokens, reasoningEffort, stream) {
+    let budgetTokens = 0;
+
+    switch (reasoningEffort) {
+        case 'low':
+            budgetTokens = Math.floor(maxTokens * 0.1);
+            break;
+        case 'medium':
+            budgetTokens = Math.floor(maxTokens * 0.25);
+            break;
+        case 'high':
+            budgetTokens = Math.floor(maxTokens * 0.5);
+            break;
+    }
+
+    budgetTokens = Math.max(budgetTokens, 1024);
+
+    if (!stream) {
+        budgetTokens = Math.min(budgetTokens, 21333);
+    }
+
+    return budgetTokens;
 }

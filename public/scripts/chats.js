@@ -130,9 +130,10 @@ function getConverter(type) {
  * @param {number} start Starting message ID
  * @param {number} end Ending message ID (inclusive)
  * @param {boolean} unhide If true, unhide the messages instead.
+ * @param {string} nameFitler Optional name filter
  * @returns {Promise<void>}
  */
-export async function hideChatMessageRange(start, end, unhide) {
+export async function hideChatMessageRange(start, end, unhide, nameFitler = null) {
     if (isNaN(start)) return;
     if (!end) end = start;
     const hide = !unhide;
@@ -140,6 +141,7 @@ export async function hideChatMessageRange(start, end, unhide) {
     for (let messageId = start; messageId <= end; messageId++) {
         const message = chat[messageId];
         if (!message) continue;
+        if (nameFitler && message.name !== nameFitler) continue;
 
         message.is_system = hide;
 
@@ -457,7 +459,7 @@ export async function appendFileContent(message, messageText) {
  * @copyright https://github.com/kwaroran/risuAI
  */
 export function encodeStyleTags(text) {
-    const styleRegex = /<style>(.+?)<\/style>/gms;
+    const styleRegex = /<style>(.+?)<\/style>/gims;
     return text.replaceAll(styleRegex, (_, match) => {
         return `<custom-style>${escape(match)}</custom-style>`;
     });
@@ -573,8 +575,8 @@ export function isExternalMediaAllowed() {
     return !power_user.forbid_external_media;
 }
 
-async function enlargeMessageImage() {
-    const mesBlock = $(this).closest('.mes');
+function expandMessageImage(event) {
+    const mesBlock = $(event.currentTarget).closest('.mes');
     const mesId = mesBlock.attr('mesid');
     const message = chat[mesId];
     const imgSrc = message?.extra?.image;
@@ -618,7 +620,12 @@ async function enlargeMessageImage() {
         popup.completeCancelled();
     });
 
-    await popup.show();
+    popup.show();
+    return img;
+}
+
+function expandAndZoomMessageImage(event) {
+    expandMessageImage(event).click();
 }
 
 async function deleteMessageImage() {
@@ -1506,7 +1513,7 @@ jQuery(function () {
         embedMessageFile(messageId, messageBlock);
     });
 
-    $(document).on('click', '.editor_maximize', function () {
+    $(document).on('click', '.editor_maximize', async function () {
         const broId = $(this).attr('data-for');
         const bro = $(`#${broId}`);
         const contentEditable = bro.is('[contenteditable]');
@@ -1525,6 +1532,7 @@ jQuery(function () {
         textarea.value = String(contentEditable ? bro[0].innerText : bro.val());
         textarea.classList.add('height100p', 'wide100p', 'maximized_textarea');
         bro.hasClass('monospace') && textarea.classList.add('monospace');
+        bro.hasClass('mdHotkeys') && textarea.classList.add('mdHotkeys');
         textarea.addEventListener('input', function () {
             if (contentEditable) {
                 bro[0].innerText = textarea.value;
@@ -1565,7 +1573,7 @@ jQuery(function () {
             });
         }
 
-        callGenericPopup(wrapper, POPUP_TYPE.TEXT, '', { wide: true, large: true });
+        await callGenericPopup(wrapper, POPUP_TYPE.TEXT, '', { wide: true, large: true });
     });
 
     $(document).on('click', 'body.documentstyle .mes .mes_text', function () {
@@ -1600,7 +1608,8 @@ jQuery(function () {
         reloadCurrentChat();
     });
 
-    $(document).on('click', '.mes_img_enlarge', enlargeMessageImage);
+    $(document).on('click', '.mes_img', expandMessageImage);
+    $(document).on('click', '.mes_img_enlarge', expandAndZoomMessageImage);
     $(document).on('click', '.mes_img_delete', deleteMessageImage);
 
     $('#file_form_input').on('change', async () => {

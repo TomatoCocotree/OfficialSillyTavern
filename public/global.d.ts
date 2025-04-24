@@ -1,18 +1,25 @@
 import libs from './lib';
 import getContext from './scripts/st-context';
-
-// Global namespace modules
-declare var ai;
-declare var pdfjsLib;
-declare var ePub;
-
-declare var SillyTavern: {
-    getContext(): typeof getContext;
-    llm: any;
-    libs: typeof libs;
-};
+import { power_user } from './scripts/power-user';
 
 declare global {
+    // Custom types
+    declare type InstructSettings = typeof power_user.instruct;
+
+    // Global namespace modules
+    interface Window {
+        ai: any;
+    }
+
+    declare var pdfjsLib;
+    declare var ePub;
+
+    declare var SillyTavern: {
+        getContext(): typeof getContext;
+        llm: any;
+        libs: typeof libs;
+    };
+
     // Jquery plugins
     interface JQuery {
         nanogallery2(options?: any): JQuery;
@@ -40,4 +47,12 @@ declare global {
             searchInputCssClass?: string;
         }
     }
+
+    /**
+     * Translates a text to a target language using a translation provider.
+     * @param text Text to translate
+     * @param lang Target language
+     * @param provider Translation provider
+     */
+    async function translate(text: string, lang: string, provider: string = null): Promise<string>;
 }

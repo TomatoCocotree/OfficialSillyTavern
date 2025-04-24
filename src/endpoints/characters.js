@@ -10,25 +10,164 @@ import { sync as writeFileAtomicSync } from 'write-file-atomic';
 import yaml from 'yaml';
 import _ from 'lodash';
 import mime from 'mime-types';
-import jimp from 'jimp';
+import { Jimp, JimpMime } from '../jimp.js';
+import storage from 'node-persist';
 
 import { AVATAR_WIDTH, AVATAR_HEIGHT } from '../constants.js';
-import { jsonParser, urlencodedParser } from '../express-common.js';
 import { default as validateAvatarUrlMiddleware, getFileNameValidationFunction } from '../middleware/validateFileName.js';
-import { deepMerge, humanizedISO8601DateTime, tryParse, extractFileFromZipBuffer, MemoryLimitedMap, getConfigValue } from '../util.js';
+import { deepMerge, humanizedISO8601DateTime, tryParse, extractFileFromZipBuffer, MemoryLimitedMap, getConfigValue, mutateJsonString } from '../util.js';
 import { TavernCardValidator } from '../validator/TavernCardValidator.js';
-import { parse, write } from '../character-card-parser.js';
+import { parse, read, write } from '../character-card-parser.js';
 import { readWorldInfoFile } from './worldinfo.js';
 import { invalidateThumbnail } from './thumbnails.js';
 import { importRisuSprites } from './sprites.js';
+import { getUserDirectories } from '../users.js';
 const defaultAvatarPath = './public/img/ai4.png';
 
-// KV-store for parsed character data
-const cacheCapacity = Number(getConfigValue('cardsCacheCapacity', 100)); // MB
 // With 100 MB limit it would take roughly 3000 characters to reach this limit
-const characterDataCache = new MemoryLimitedMap(1024 * 1024 * cacheCapacity);
+const memoryCacheCapacity = getConfigValue('performance.memoryCacheCapacity', '100mb');
+const memoryCache = new MemoryLimitedMap(memoryCacheCapacity);
 // Some Android devices require tighter memory management
 const isAndroid = process.platform === 'android';
+// Use shallow character data for the character list
+const useShallowCharacters = !!getConfigValue('performance.lazyLoadCharacters', false, 'boolean');
+const useDiskCache = !!getConfigValue('performance.useDiskCache', true, 'boolean');
+
+class DiskCache {
+    /**
+     * @type {string}
+     * @readonly
+     */
+    static DIRECTORY = 'characters';
+
+    /**
+     * @type {number}
+     * @readonly
+     */
+    static SYNC_INTERVAL = 5 * 60 * 1000;
+
+    /** @type {import('node-persist').LocalStorage} */
+    #instance;
+
+    /** @type {NodeJS.Timeout} */
+    #syncInterval;
+
+    /**
+     * Queue of user handles to sync.
+     * @type {Set<string>}
+     * @readonly
+     */
+    syncQueue = new Set();
+
+    /**
+     * Path to the cache directory.
+     * @returns {string}
+     */
+    get cachePath() {
+        return path.join(globalThis.DATA_ROOT, '_cache', DiskCache.DIRECTORY);
+    }
+
+    /**
+     * Returns the list of hashed keys in the cache.
+     * @returns {string[]}
+     */
+    get hashedKeys() {
+        return fs.readdirSync(this.cachePath);
+    }
+
+    /**
+     * Processes the synchronization queue.
+     * @returns {Promise<void>}
+     */
+    async #syncCacheEntries() {
+        try {
+            if (!useDiskCache || this.syncQueue.size === 0) {
+                return;
+            }
+
+            const directories = [...this.syncQueue].map(entry => getUserDirectories(entry));
+            this.syncQueue.clear();
+
+            await this.verify(directories);
+        } catch (error) {
+            console.error('Error while synchronizing cache entries:', error);
+        }
+    }
+
+    /**
+     * Gets the disk cache instance.
+     * @returns {Promise<import('node-persist').LocalStorage>}
+     */
+    async instance() {
+        if (this.#instance) {
+            return this.#instance;
+        }
+
+        this.#instance = storage.create({
+            dir: this.cachePath,
+            ttl: false,
+            forgiveParseErrors: true,
+            // @ts-ignore
+            maxFileDescriptors: 100,
+        });
+        await this.#instance.init();
+        this.#syncInterval = setInterval(this.#syncCacheEntries.bind(this), DiskCache.SYNC_INTERVAL);
+        return this.#instance;
+    }
+
+    /**
+     * Verifies disk cache size and prunes it if necessary.
+     * @param {import('../users.js').UserDirectoryList[]} directoriesList List of user directories
+     * @returns {Promise<void>}
+     */
+    async verify(directoriesList) {
+        try {
+            if (!useDiskCache) {
+                return;
+            }
+
+            const cache = await this.instance();
+            const validKeys = new Set();
+            for (const dir of directoriesList) {
+                const files = fs.readdirSync(dir.characters, { withFileTypes: true });
+                for (const file of files.filter(f => f.isFile() && path.extname(f.name) === '.png')) {
+                    const filePath = path.join(dir.characters, file.name);
+                    const cacheKey = getCacheKey(filePath);
+                    validKeys.add(path.parse(cache.getDatumPath(cacheKey)).base);
+                }
+            }
+            for (const key of this.hashedKeys) {
+                if (!validKeys.has(key)) {
+                    await cache.removeItem(key);
+                }
+            }
+        } catch (error) {
+            console.error('Error while verifying disk cache:', error);
+        }
+    }
+
+    dispose() {
+        if (this.#syncInterval) {
+            clearInterval(this.#syncInterval);
+        }
+    }
+}
+
+export const diskCache = new DiskCache();
+
+/**
+ * Gets the cache key for the specified image file.
+ * @param {string} inputFile - Path to the image file
+ * @returns {string} - Cache key
+ */
+function getCacheKey(inputFile) {
+    if (fs.existsSync(inputFile)) {
+        const stat = fs.statSync(inputFile);
+        return `${inputFile}-${stat.mtimeMs}`;
+    }
+
+    return inputFile;
+}
 
 /**
  * Reads the character card from the specified image file.
@@ -37,14 +176,32 @@ const isAndroid = process.platform === 'android';
  * @returns {Promise<string | undefined>} - Character card data
  */
 async function readCharacterData(inputFile, inputFormat = 'png') {
-    const stat = fs.statSync(inputFile);
-    const cacheKey = `${inputFile}-${stat.mtimeMs}`;
-    if (characterDataCache.has(cacheKey)) {
-        return characterDataCache.get(cacheKey);
+    const cacheKey = getCacheKey(inputFile);
+    if (memoryCache.has(cacheKey)) {
+        return memoryCache.get(cacheKey);
+    }
+    if (useDiskCache) {
+        try {
+            const cache = await diskCache.instance();
+            const cachedData = await cache.getItem(cacheKey);
+            if (cachedData) {
+                return cachedData;
+            }
+        } catch (error) {
+            console.warn('Error while reading from disk cache:', error);
+        }
     }
 
-    const result = parse(inputFile, inputFormat);
-    !isAndroid && characterDataCache.set(cacheKey, result);
+    const result = await parse(inputFile, inputFormat);
+    !isAndroid && memoryCache.set(cacheKey, result);
+    if (useDiskCache) {
+        try {
+            const cache = await diskCache.instance();
+            await cache.setItem(cacheKey, result);
+        } catch (error) {
+            console.warn('Error while writing to disk cache:', error);
+        }
+    }
     return result;
 }
 
@@ -60,16 +217,18 @@ async function readCharacterData(inputFile, inputFormat = 'png') {
 async function writeCharacterData(inputFile, data, outputFile, request, crop = undefined) {
     try {
         // Reset the cache
-        for (const key of characterDataCache.keys()) {
+        for (const key of memoryCache.keys()) {
             if (Buffer.isBuffer(inputFile)) {
                 break;
             }
             if (key.startsWith(inputFile)) {
-                characterDataCache.delete(key);
+                memoryCache.delete(key);
                 break;
             }
         }
-
+        if (useDiskCache && !Buffer.isBuffer(inputFile)) {
+            diskCache.syncQueue.add(request.user.profile.handle);
+        }
         /**
          * Read the image, resize, and save it as a PNG into the buffer.
          * @returns {Promise<Buffer>} Image buffer
@@ -118,12 +277,12 @@ async function writeCharacterData(inputFile, data, outputFile, request, crop = u
  * @returns {Promise<Buffer>} Image buffer
  */
 async function parseImageBuffer(buffer, crop) {
-    const image = await jimp.read(buffer);
+    const image = await Jimp.fromBuffer(buffer);
     let finalWidth = image.bitmap.width, finalHeight = image.bitmap.height;
 
     // Apply crop if defined
     if (typeof crop == 'object' && [crop.x, crop.y, crop.width, crop.height].every(x => typeof x === 'number')) {
-        image.crop(crop.x, crop.y, crop.width, crop.height);
+        image.crop({ x: crop.x, y: crop.y, w: crop.width, h: crop.height });
         // Apply standard resize if requested
         if (crop.want_resize) {
             finalWidth = AVATAR_WIDTH;
@@ -134,7 +293,8 @@ async function parseImageBuffer(buffer, crop) {
         }
     }
 
-    return image.cover(finalWidth, finalHeight).getBufferAsync(jimp.MIME_PNG);
+    image.cover({ w: finalWidth, h: finalHeight });
+    return await image.getBuffer(JimpMime.png);
 }
 
 /**
@@ -145,12 +305,12 @@ async function parseImageBuffer(buffer, crop) {
  */
 async function tryReadImage(imgPath, crop) {
     try {
-        let rawImg = await jimp.read(imgPath);
+        const rawImg = await Jimp.read(imgPath);
         let finalWidth = rawImg.bitmap.width, finalHeight = rawImg.bitmap.height;
 
         // Apply crop if defined
         if (typeof crop == 'object' && [crop.x, crop.y, crop.width, crop.height].every(x => typeof x === 'number')) {
-            rawImg = rawImg.crop(crop.x, crop.y, crop.width, crop.height);
+            rawImg.crop({ x: crop.x, y: crop.y, w: crop.width, h: crop.height });
             // Apply standard resize if requested
             if (crop.want_resize) {
                 finalWidth = AVATAR_WIDTH;
@@ -161,8 +321,8 @@ async function tryReadImage(imgPath, crop) {
             }
         }
 
-        const image = await rawImg.cover(finalWidth, finalHeight).getBufferAsync(jimp.MIME_PNG);
-        return image;
+        rawImg.cover({ w: finalWidth, h: finalHeight });
+        return await rawImg.getBuffer(JimpMime.png);
     }
     // If it's an unsupported type of image (APNG) - just read the file as buffer
     catch (error) {
@@ -197,7 +357,38 @@ const calculateChatSize = (charDir) => {
 
 // Calculate the total string length of the data object
 const calculateDataSize = (data) => {
-    return typeof data === 'object' ? Object.values(data).reduce((acc, val) => acc + new String(val).length, 0) : 0;
+    return typeof data === 'object' ? Object.values(data).reduce((acc, val) => acc + String(val).length, 0) : 0;
+};
+
+/**
+ * Only get fields that are used to display the character list.
+ * @param {object} character Character object
+ * @returns {{shallow: true, [key: string]: any}} Shallow character
+ */
+const toShallow = (character) => {
+    return {
+        shallow: true,
+        name: character.name,
+        avatar: character.avatar,
+        chat: character.chat,
+        fav: character.fav,
+        date_added: character.date_added,
+        create_date: character.create_date,
+        date_last_chat: character.date_last_chat,
+        chat_size: character.chat_size,
+        data_size: character.data_size,
+        tags: character.tags,
+        data: {
+            name: _.get(character, 'data.name', ''),
+            character_version: _.get(character, 'data.character_version', ''),
+            creator: _.get(character, 'data.creator', ''),
+            creator_notes: _.get(character, 'data.creator_notes', ''),
+            tags: _.get(character, 'data.tags', []),
+            extensions: {
+                fav: _.get(character, 'data.extensions.fav', false),
+            },
+        },
+    };
 };
 
 /**
@@ -205,9 +396,11 @@ const calculateDataSize = (data) => {
  *
  * @param  {string} item The name of the character.
  * @param  {import('../users.js').UserDirectoryList} directories User directories
+ * @param  {object} options Options for the character processing
+ * @param  {boolean} options.shallow If true, only return the core character's metadata
  * @return {Promise<object>}     A Promise that resolves when the character processing is done.
  */
-const processCharacter = async (item, directories) => {
+const processCharacter = async (item, directories, { shallow }) => {
     try {
         const imgFile = path.join(directories.characters, item);
         const imgData = await readCharacterData(imgFile);
@@ -226,7 +419,7 @@ const processCharacter = async (item, directories) => {
         character['chat_size'] = chatSize;
         character['date_last_chat'] = dateLastChat;
         character['data_size'] = calculateDataSize(jsonObject?.data);
-        return character;
+        return shallow ? toShallow(character) : character;
     }
     catch (err) {
         console.error(`Could not process character: ${item}`);
@@ -297,10 +490,13 @@ function convertToV2(char, directories) {
     return result;
 }
 
-
-function unsetFavFlag(char) {
+/**
+ * Removes fields that are not meant to be shared.
+ */
+function unsetPrivateFields(char) {
     _.set(char, 'fav', false);
     _.set(char, 'data.extensions.fav', false);
+    _.unset(char, 'chat');
 }
 
 function readFromV2(char) {
@@ -586,7 +782,7 @@ async function importFromCharX(uploadPath, { request }, preservedFileName) {
         }
     }
 
-    unsetFavFlag(card);
+    unsetPrivateFields(card);
     card['create_date'] = humanizedISO8601DateTime();
     card.name = sanitize(card.name);
     const fileName = preservedFileName || getPngName(card.name, request.user.directories);
@@ -610,7 +806,7 @@ async function importFromJson(uploadPath, { request }, preservedFileName) {
     if (jsonData.spec !== undefined) {
         console.info(`Importing from ${jsonData.spec} json`);
         importRisuSprites(request.user.directories, jsonData);
-        unsetFavFlag(jsonData);
+        unsetPrivateFields(jsonData);
         jsonData = readFromV2(jsonData);
         jsonData['create_date'] = humanizedISO8601DateTime();
         const pngName = preservedFileName || getPngName(jsonData.data?.name || jsonData.name, request.user.directories);
@@ -693,7 +889,7 @@ async function importFromPng(uploadPath, { request }, preservedFileName) {
     if (jsonData.spec !== undefined) {
         console.info(`Found a ${jsonData.spec} character file.`);
         importRisuSprites(request.user.directories, jsonData);
-        unsetFavFlag(jsonData);
+        unsetPrivateFields(jsonData);
         jsonData = readFromV2(jsonData);
         jsonData['create_date'] = humanizedISO8601DateTime();
         const char = JSON.stringify(jsonData);
@@ -734,7 +930,7 @@ async function importFromPng(uploadPath, { request }, preservedFileName) {
 
 export const router = express.Router();
 
-router.post('/create', urlencodedParser, async function (request, response) {
+router.post('/create', async function (request, response) {
     try {
         if (!request.body) return response.sendStatus(400);
 
@@ -763,7 +959,7 @@ router.post('/create', urlencodedParser, async function (request, response) {
     }
 });
 
-router.post('/rename', jsonParser, validateAvatarUrlMiddleware, async function (request, response) {
+router.post('/rename', validateAvatarUrlMiddleware, async function (request, response) {
     if (!request.body.avatar_url || !request.body.new_name) {
         return response.sendStatus(400);
     }
@@ -810,7 +1006,7 @@ router.post('/rename', jsonParser, validateAvatarUrlMiddleware, async function (
     }
 });
 
-router.post('/edit', urlencodedParser, validateAvatarUrlMiddleware, async function (request, response) {
+router.post('/edit', validateAvatarUrlMiddleware, async function (request, response) {
     if (!request.body) {
         console.warn('Error: no response body detected');
         response.status(400).send('Error: no response body detected');
@@ -862,7 +1058,7 @@ router.post('/edit', urlencodedParser, validateAvatarUrlMiddleware, async functi
  * @param {Object} response - The HTTP response object.
  * @returns {void}
  */
-router.post('/edit-attribute', jsonParser, validateAvatarUrlMiddleware, async function (request, response) {
+router.post('/edit-attribute', validateAvatarUrlMiddleware, async function (request, response) {
     console.debug(request.body);
     if (!request.body) {
         console.warn('Error: no response body detected');
@@ -908,7 +1104,7 @@ router.post('/edit-attribute', jsonParser, validateAvatarUrlMiddleware, async fu
  *
  * @returns {void}
  * */
-router.post('/merge-attributes', jsonParser, getFileNameValidationFunction('avatar'), async function (request, response) {
+router.post('/merge-attributes', getFileNameValidationFunction('avatar'), async function (request, response) {
     try {
         const update = request.body;
         const avatarPath = path.join(request.user.directories.characters, update.avatar);
@@ -939,7 +1135,7 @@ router.post('/merge-attributes', jsonParser, getFileNameValidationFunction('avat
     }
 });
 
-router.post('/delete', jsonParser, validateAvatarUrlMiddleware, async function (request, response) {
+router.post('/delete', validateAvatarUrlMiddleware, async function (request, response) {
     if (!request.body || !request.body.avatar_url) {
         return response.sendStatus(400);
     }
@@ -989,11 +1185,11 @@ router.post('/delete', jsonParser, validateAvatarUrlMiddleware, async function (
  * @param  {import("express").Response} response The HTTP response object.
  * @return {void}
  */
-router.post('/all', jsonParser, async function (request, response) {
+router.post('/all', async function (request, response) {
     try {
         const files = fs.readdirSync(request.user.directories.characters);
         const pngFiles = files.filter(file => file.endsWith('.png'));
-        const processingPromises = pngFiles.map(file => processCharacter(file, request.user.directories));
+        const processingPromises = pngFiles.map(file => processCharacter(file, request.user.directories, { shallow: useShallowCharacters }));
         const data = (await Promise.all(processingPromises)).filter(c => c.name);
         return response.send(data);
     } catch (err) {
@@ -1002,7 +1198,7 @@ router.post('/all', jsonParser, async function (request, response) {
     }
 });
 
-router.post('/get', jsonParser, validateAvatarUrlMiddleware, async function (request, response) {
+router.post('/get', validateAvatarUrlMiddleware, async function (request, response) {
     try {
         if (!request.body) return response.sendStatus(400);
         const item = request.body.avatar_url;
@@ -1012,7 +1208,7 @@ router.post('/get', jsonParser, validateAvatarUrlMiddleware, async function (req
             return response.sendStatus(404);
         }
 
-        const data = await processCharacter(item, request.user.directories);
+        const data = await processCharacter(item, request.user.directories, { shallow: false });
 
         return response.send(data);
     } catch (err) {
@@ -1021,12 +1217,12 @@ router.post('/get', jsonParser, validateAvatarUrlMiddleware, async function (req
     }
 });
 
-router.post('/chats', jsonParser, validateAvatarUrlMiddleware, async function (request, response) {
-    if (!request.body) return response.sendStatus(400);
-
-    const characterDirectory = (request.body.avatar_url).replace('.png', '');
-
+router.post('/chats', validateAvatarUrlMiddleware, async function (request, response) {
     try {
+        if (!request.body) return response.sendStatus(400);
+
+        const characterDirectory = (request.body.avatar_url).replace('.png', '');
+
         const chatsDirectory = path.join(request.user.directories.chats, characterDirectory);
 
         if (!fs.existsSync(chatsDirectory)) {
@@ -1130,7 +1326,7 @@ function getPreservedName(request) {
         : undefined;
 }
 
-router.post('/import', urlencodedParser, async function (request, response) {
+router.post('/import', async function (request, response) {
     if (!request.body || !request.file) return response.sendStatus(400);
 
     const uploadPath = path.join(request.file.destination, request.file.filename);
@@ -1170,7 +1366,7 @@ router.post('/import', urlencodedParser, async function (request, response) {
     }
 });
 
-router.post('/duplicate', jsonParser, validateAvatarUrlMiddleware, async function (request, response) {
+router.post('/duplicate', validateAvatarUrlMiddleware, async function (request, response) {
     try {
         if (!request.body.avatar_url) {
             console.warn('avatar URL not found in request body');
@@ -1216,7 +1412,7 @@ router.post('/duplicate', jsonParser, validateAvatarUrlMiddleware, async functio
     }
 });
 
-router.post('/export', jsonParser, validateAvatarUrlMiddleware, async function (request, response) {
+router.post('/export', validateAvatarUrlMiddleware, async function (request, response) {
     try {
         if (!request.body.format || !request.body.avatar_url) {
             return response.sendStatus(400);
@@ -1230,17 +1426,21 @@ router.post('/export', jsonParser, validateAvatarUrlMiddleware, async function (
 
         switch (request.body.format) {
             case 'png': {
-                const fileContent = await fsPromises.readFile(filename);
+                const rawBuffer = await fsPromises.readFile(filename);
+                const rawData = read(rawBuffer);
+                const mutatedData = mutateJsonString(rawData, unsetPrivateFields);
+                const mutatedBuffer = write(rawBuffer, mutatedData);
                 const contentType = mime.lookup(filename) || 'image/png';
                 response.setHeader('Content-Type', contentType);
                 response.setHeader('Content-Disposition', `attachment; filename="${encodeURI(path.basename(filename))}"`);
-                return response.send(fileContent);
+                return response.send(mutatedBuffer);
             }
             case 'json': {
                 try {
-                    let json = await readCharacterData(filename);
+                    const json = await readCharacterData(filename);
                     if (json === undefined) return response.sendStatus(400);
-                    let jsonObject = getCharaCardV2(JSON.parse(json), request.user.directories);
+                    const jsonObject = getCharaCardV2(JSON.parse(json), request.user.directories);
+                    unsetPrivateFields(jsonObject);
                     return response.type('json').send(JSON.stringify(jsonObject, null, 4));
                 }
                 catch {
