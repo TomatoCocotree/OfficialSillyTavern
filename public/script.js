@@ -7284,8 +7284,7 @@ async function messageEditCancel(messageId = this_edit_mes_id) {
     // If this is the button then select it's parent. Otherwise, select by messageId.
     if (this?.classList?.contains('mes_edit_cancel')) {
         thisMesDiv = $(this).closest('.mes');
-    } else
-    {
+    } else {
         thisMesDiv = chatElement.children().filter(`[mesid="${messageId}"]`);
     }
 
