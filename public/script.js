@@ -1467,6 +1467,68 @@ export async function deleteLastMessage() {
     await eventSource.emit(event_types.MESSAGE_DELETED, chat.length);
 }
 
+/**
+ * Deletes a message from the chat by its ID, optionally asking for confirmation.
+ * @param {number} id The ID of the message to delete.
+ * @param {number} [swipeDeletionIndex] Deletes the swipe with that index.
+ * @param {boolean} [askConfirmation=false] Whether to ask for confirmation before deleting.
+ */
+export async function deleteMessage(id, swipeDeletionIndex = undefined, askConfirmation = false) {
+    if (swipeDeletionIndex !== undefined) {
+        if (swipeDeletionIndex < 0) {
+            throw new Error('Swipe index cannot be negative');
+        }
+        if (!Array.isArray(chat[id].swipes)) {
+            throw new Error('Message has no swipes to delete');
+        }
+        if (chat[id].swipes.length <= swipeDeletionIndex) {
+            throw new Error('Swipe index out of bounds');
+        }
+    }
+
+    const messageElement = chatElement.find(`.mes[mesid="${id}"]`);
+    if (messageElement.length === 0) {
+        return;
+    }
+
+    const canDeleteSwipe = swipeDeletionIndex !== undefined;
+    let deleteOnlySwipe = canDeleteSwipe;
+    if (askConfirmation) {
+        const result = await callGenericPopup(t`Are you sure you want to delete this message?`, POPUP_TYPE.CONFIRM, null, {
+            okButton: canDeleteSwipe ? t`Delete Swipe` : t`Delete Message`,
+            cancelButton: 'Cancel',
+            customButtons: canDeleteSwipe ? [t`Delete Message`] : null,
+        });
+        if (!result) {
+            return;
+        }
+        deleteOnlySwipe = canDeleteSwipe && result === POPUP_RESULT.AFFIRMATIVE; // Default button, not the custom one
+    }
+
+    if (deleteOnlySwipe) {
+        await deleteSwipe(swipeDeletionIndex, id);
+        return;
+    }
+
+    chat.splice(id, 1);
+    messageElement.remove();
+
+    chat_metadata['tainted'] = true;
+
+    const startFromZero = id === 0;
+    updateViewMessageIds(startFromZero);
+    await saveChatConditional();
+
+    if (this_edit_mes_id === id) {
+        this_edit_mes_id = undefined;
+    }
+
+    hideSwipeButtons();
+    showSwipeButtons();
+
+    await eventSource.emit(event_types.MESSAGE_DELETED, chat.length);
+}
+
 export async function reloadCurrentChat() {
     preserveNeutralChat();
     await clearChat();
@@ -10531,48 +10593,11 @@ jQuery(async function () {
 
     $(document).on('click', '.mes_edit_delete', async function (event, customData) {
         const fromSlashCommand = customData?.fromSlashCommand || false;
-        const canDeleteSwipe = (Array.isArray(chat[this_edit_mes_id].swipes) && chat[this_edit_mes_id].swipes.length > 1 && !chat[this_edit_mes_id].is_user && Number(this_edit_mes_id) === chat.length - 1);
-
-        let deleteOnlySwipe = false;
-        if (power_user.confirm_message_delete && fromSlashCommand !== true) {
-            const result = await callGenericPopup(t`Are you sure you want to delete this message?`, POPUP_TYPE.CONFIRM, null, {
-                okButton: canDeleteSwipe ? t`Delete Swipe` : t`Delete Message`,
-                cancelButton: 'Cancel',
-                customButtons: canDeleteSwipe ? [t`Delete Message`] : null,
-            });
-            if (!result) {
-                return;
-            }
-            deleteOnlySwipe = canDeleteSwipe && result === 1; // Default button, not the custom one
-        }
-
-        const messageElement = $(this).closest('.mes');
-        if (!messageElement) {
-            return;
-        }
-
-        if (deleteOnlySwipe) {
-            const message = chat[this_edit_mes_id];
-            const swipe_id = message.swipe_id;
-            await deleteSwipe(swipe_id, Number(this_edit_mes_id));
-            return;
-        }
-
-        chat.splice(this_edit_mes_id, 1);
-        messageElement.remove();
-
-        let startFromZero = Number(this_edit_mes_id) === 0;
-
-        this_edit_mes_id = undefined;
-        chat_metadata['tainted'] = true;
-
-        updateViewMessageIds(startFromZero);
-        saveChatDebounced();
-
-        hideSwipeButtons();
-        showSwipeButtons();
-
-        await eventSource.emit(event_types.MESSAGE_DELETED, chat.length);
+        const message = chat[this_edit_mes_id];
+        const selectedSwipe = message['swipe_id'] ?? undefined;
+        const swipesArray = Array.isArray(message['swipes']) ? message['swipes'] : [];
+        const canDeleteSwipe = !message.is_user && swipesArray.length > 1 && this_edit_mes_id === chat.length - 1 && selectedSwipe !== undefined;
+        await deleteMessage(Number(this_edit_mes_id), canDeleteSwipe ? selectedSwipe : undefined, power_user.confirm_message_delete && fromSlashCommand !== true);
     });
 
     $(document).on('click', '.mes_edit_done', async function () {
