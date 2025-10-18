@@ -8186,6 +8186,8 @@ export async function deleteSwipe(swipeId = null, messageId = chat.length - 1) {
     const newSwipeId = Math.min(swipeId, message.swipes.length - 1);
     syncSwipeToMes(messageId, newSwipeId);
 
+    chat_metadata['tainted'] = true;
+
     await eventSource.emit(event_types.MESSAGE_SWIPE_DELETED, { messageId, swipeId, newSwipeId });
 
     await saveChatConditional();
