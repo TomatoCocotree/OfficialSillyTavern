@@ -1474,7 +1474,8 @@ export async function deleteLastMessage() {
  * @param {boolean} [askConfirmation=false] Whether to ask for confirmation before deleting.
  */
 export async function deleteMessage(id, swipeDeletionIndex = undefined, askConfirmation = false) {
-    if (swipeDeletionIndex !== undefined) {
+    const canDeleteSwipe = swipeDeletionIndex !== undefined && swipeDeletionIndex !== null;
+    if (canDeleteSwipe) {
         if (swipeDeletionIndex < 0) {
             throw new Error('Swipe index cannot be negative');
         }
@@ -1486,12 +1487,12 @@ export async function deleteMessage(id, swipeDeletionIndex = undefined, askConfi
         }
     }
 
+    const minId = getFirstDisplayedMessageId();
     const messageElement = chatElement.find(`.mes[mesid="${id}"]`);
     if (messageElement.length === 0) {
         return;
     }
 
-    const canDeleteSwipe = swipeDeletionIndex !== undefined;
     let deleteOnlySwipe = canDeleteSwipe;
     if (askConfirmation) {
         const result = await callGenericPopup(t`Are you sure you want to delete this message?`, POPUP_TYPE.CONFIRM, null, {
@@ -1515,8 +1516,8 @@ export async function deleteMessage(id, swipeDeletionIndex = undefined, askConfi
 
     chat_metadata['tainted'] = true;
 
-    const startFromZero = id === 0;
-    updateViewMessageIds(startFromZero);
+    const startIndex = [0, minId].includes(id) ? id : null;
+    updateViewMessageIds(startIndex);
     await saveChatConditional();
 
     if (this_edit_mes_id === id) {
@@ -8258,8 +8259,8 @@ async function importCharacterChat(formData, { refresh = true } = {}) {
     return [];
 }
 
-function updateViewMessageIds(startFromZero = false) {
-    const minId = startFromZero ? 0 : getFirstDisplayedMessageId();
+function updateViewMessageIds(startIndex = null) {
+    const minId = startIndex ?? getFirstDisplayedMessageId();
 
     chatElement.find('.mes').each(function (index, element) {
         $(element).attr('mesid', minId + index);
