@@ -5264,7 +5264,7 @@ function setInContextMessages(msgInContextCount, type) {
         msgInContextCount++;
     }
 
-    const lastMessageBlock = chatElement.find('.mes:not([is_system="true"])').eq(-msgInContextCount);
+    const lastMessageBlock = chatElement.find('.mes:not([is_system="true"]), .mes.toolCall').eq(-msgInContextCount);
     lastMessageBlock.addClass('lastInContext');
 
     if (lastMessageBlock.length === 0) {
@@ -5520,6 +5520,7 @@ export function extractJsonFromData(data, { mainApi = null, chatCompletionSource
                 case chat_completion_sources.XAI:
                 case chat_completion_sources.ELECTRONHUB:
                 case chat_completion_sources.AZURE_OPENAI:
+                case chat_completion_sources.ZAI:
                 default:
                     result = tryParse(text);
                     break;
