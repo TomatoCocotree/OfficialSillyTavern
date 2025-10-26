@@ -79,7 +79,7 @@ async function parseOllamaStream(jsonStream, request, response) {
 async function abortKoboldCppRequest(request, url) {
     try {
         console.info('Aborting Kobold generation...');
-        let args = {
+        const args = {
             method: 'POST',
             headers: {},
         };
