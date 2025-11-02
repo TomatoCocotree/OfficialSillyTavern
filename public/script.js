@@ -183,7 +183,7 @@ import {
     trimSpaces,
     clamp,
 } from './scripts/utils.js';
-import { debounce_timeout, GENERATION_TYPE_TRIGGERS, IGNORE_SYMBOL, inject_ids, MEDIA_DISPLAY, MEDIA_TYPE, SWIPE_DIRECTION } from './scripts/constants.js';
+import { debounce_timeout, GENERATION_TYPE_TRIGGERS, IGNORE_SYMBOL, inject_ids, MEDIA_DISPLAY, MEDIA_TYPE, SCROLL_BEHAVIOR, SWIPE_DIRECTION } from './scripts/constants.js';
 
 import { cancelDebouncedMetadataSave, doDailyExtensionUpdatesCheck, extension_settings, initExtensions, loadExtensionSettings, runGenerationInterceptors, saveMetadataDebounced } from './scripts/extensions.js';
 import { COMMENT_NAME_DEFAULT, CONNECT_API_MAP, executeSlashCommandsOnChatInput, initDefaultSlashCommands, isExecutingCommandsFromChatInput, pauseScriptExecution, stopScriptExecution, UNIQUE_APIS } from './scripts/slash-commands.js';
@@ -2071,9 +2071,9 @@ export function getMediaIndex(mes) {
  * Appends image or file to the message element.
  * @param {ChatMessage} mes Message object
  * @param {JQuery<HTMLElement>} messageElement Message element
- * @param {boolean} [adjustScroll=true] Whether to adjust the scroll position after appending the media
+ * @param {string} [scrollBehavior] Scroll behavior when adjusting scroll position
  */
-export function appendMediaToMessage(mes, messageElement, adjustScroll = true) {
+export function appendMediaToMessage(mes, messageElement, scrollBehavior = SCROLL_BEHAVIOR.ADJUST) {
     ensureMessageMediaIsArray(mes);
 
     const hasMedia = Array.isArray(mes?.extra?.media) && mes.extra.media.length > 0;
@@ -2084,13 +2084,16 @@ export function appendMediaToMessage(mes, messageElement, adjustScroll = true) {
     const mediaBlocks = [];
     const mediaPromises = [];
 
-    const chatHeight = adjustScroll && (hasMedia || hasFiles) ? chatElement.prop('scrollHeight') : 0;
-    const scrollPosition = chatElement.scrollTop();
+    const chatHeight = (hasMedia || hasFiles) ? chatElement.prop('scrollHeight') : 0;
+    const scrollPosition = (hasMedia || hasFiles) ? chatElement.scrollTop() : 0;
     const doAdjustScroll = () => {
         if (!hasMedia && !hasFiles) {
             return;
         }
-        if (!adjustScroll) {
+        if (scrollBehavior === SCROLL_BEHAVIOR.NONE) {
+            return;
+        }
+        if (scrollBehavior === SCROLL_BEHAVIOR.KEEP) {
             chatElement.scrollTop(scrollPosition);
             return;
         }
@@ -2397,7 +2400,7 @@ export function addOneMessage(mes, { type = 'normal', insertAfter = null, scroll
         swipeMessage.find('.mes_text').html(messageText).attr('title', title);
         swipeMessage.find('.timestamp').text(timestamp).attr('title', `${params.extra.api} - ${params.extra.model}`);
         updateReasoningUI(swipeMessage);
-        appendMediaToMessage(mes, swipeMessage);
+        appendMediaToMessage(mes, swipeMessage, scroll ? SCROLL_BEHAVIOR.ADJUST : SCROLL_BEHAVIOR.NONE);
         if (power_user.timestamp_model_icon && params.extra?.api) {
             insertSVGIcon(swipeMessage, params.extra);
         }
@@ -2412,7 +2415,7 @@ export function addOneMessage(mes, { type = 'normal', insertAfter = null, scroll
     } else {
         const messageId = forceId ?? chat.length - 1;
         chatElement.find(`[mesid="${messageId}"] .mes_text`).append(messageText);
-        appendMediaToMessage(mes, newMessage);
+        appendMediaToMessage(mes, newMessage, scroll ? SCROLL_BEHAVIOR.ADJUST : SCROLL_BEHAVIOR.NONE);
         showSwipes && hideSwipeButtons();
     }
 
