@@ -2087,6 +2087,9 @@ export function appendMediaToMessage(mes, messageElement, adjustScroll = true) {
     const chatHeight = adjustScroll && (hasMedia || hasFiles) ? chatElement.prop('scrollHeight') : 0;
     const scrollPosition = chatElement.scrollTop();
     const doAdjustScroll = () => {
+        if (!hasMedia && !hasFiles) {
+            return;
+        }
         if (!adjustScroll) {
             chatElement.scrollTop(scrollPosition);
             return;
