@@ -2516,7 +2516,7 @@ async function sendOpenAIRequest(type, messages, signal, { jsonSchema = null } =
         delete generate_data.max_tokens;
         delete generate_data.logprobs;
         delete generate_data.top_logprobs;
-        if (/chat-latest/.test(oai_settings.openai_model)) {
+        if (/gpt-5-chat-latest/.test(oai_settings.openai_model)) {
             delete generate_data.tools;
             delete generate_data.tool_choice;
         } else {
