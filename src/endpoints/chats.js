@@ -963,9 +963,10 @@ router.post('/recent', async function (request, response) {
         const max = parseInt(request.body.max ?? Number.MAX_SAFE_INTEGER);
         const recentChats = allChatFiles.sort((a, b) => b.mtime - a.mtime).slice(0, max);
         const jsonFilesPromise = recentChats.map((file) => {
+            const withMetadata = Boolean(request.body.metadata);
             return file.groupId
-                ? getChatInfo(file.filePath, { group: file.groupId }, true)
-                : getChatInfo(file.filePath, { avatar: file.pngFile }, false);
+                ? getChatInfo(file.filePath, { group: file.groupId }, true, withMetadata)
+                : getChatInfo(file.filePath, { avatar: file.pngFile }, false, withMetadata);
         });
 
         const chatData = (await Promise.allSettled(jsonFilesPromise)).filter(x => x.status === 'fulfilled').map(x => x.value);
