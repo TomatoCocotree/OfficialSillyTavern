@@ -5083,7 +5083,7 @@
                                     </div>
                                 </div>
                                 <div id="examples-behavior-block">
-                                    <label>
+                                    <label for="example_messages_behavior">
                                         <small data-i18n="Example Messages Behavior">
                                             Example Messages Behavior:
                                         </small>
@@ -5094,6 +5094,17 @@
                                         <option value="strip" data-i18n="Never include examples">Never include examples</option>
                                     </select>
                                 </div>
+                                <div>
+                                    <label for="image_overswipe">
+                                        <small data-i18n="Image Swipe Behavior:">
+                                            Image Swipe Behavior:
+                                        </small>
+                                    </label>
+                                    <select id="image_overswipe">
+                                        <option value="generate" data-i18n="Generate new">Generate new</option>
+                                        <option value="rollover" data-i18n="Roll over">Roll over</option>
+                                    </select>
+                                </div>
                                 <div class="flex-container alignitemscenter">
                                     <small data-i18n="Send on Enter">
                                         Enter to Send:
@@ -5102,15 +5113,6 @@
                                         <option value="-1" data-i18n="Disabled">Disabled</option>
                                         <option value="0" data-i18n="Automatic (PC)">Automatic (PC)</option>
                                         <option value="1" data-i18n="Enabled">Enabled</option>
-                                    </select>
-                                </div>
-                                <div class="flex-container alignItemsCenter">
-                                    <small data-i18n="Image Swipe Behavior:">
-                                        Image Swipe Behavior:
-                                    </small>
-                                    <select id="image_overswipe" class="widthNatural flex1 margin0">
-                                        <option value="generate" data-i18n="Generate new">Generate new</option>
-                                        <option value="rollover" data-i18n="Roll over">Roll over</option>
                                     </select>
                                 </div>
                                 <label class="checkbox_label" for="continue_on_send">
