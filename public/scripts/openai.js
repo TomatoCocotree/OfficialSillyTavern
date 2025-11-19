@@ -5639,8 +5639,10 @@ function toggleChatCompletionForms() {
     }
 
     $('[data-source]').each(function () {
+        const mode = $(this).data('source-mode');
         const validSources = $(this).data('source').split(',');
-        $(this).toggle(validSources.includes(oai_settings.chat_completion_source));
+        const matchesSource = validSources.includes(oai_settings.chat_completion_source);
+        $(this).toggle(mode !== 'except' ? matchesSource : !matchesSource);
     });
 }
 
