@@ -2292,3 +2292,21 @@ multimodalModels.post('/xai', async (req, res) => {
 });
 
 router.use('/multimodal-models', multimodalModels);
+
+router.post('/process', async function (request, response) {
+    try {
+        if (!Array.isArray(request.body.messages)) {
+            return response.status(400).send({ error: 'Invalid messages format' });
+        }
+
+        if (!Object.values(PROMPT_PROCESSING_TYPE).includes(request.body.type)) {
+            return response.status(400).send({ error: 'Unknown processing type' });
+        }
+
+        const messages = postProcessPrompt(request.body.messages, request.body.type, getPromptNames(request));
+        return response.send({ messages });
+    } catch (error) {
+        console.error(error);
+        return response.sendStatus(500);
+    }
+});
