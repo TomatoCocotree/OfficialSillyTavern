@@ -958,7 +958,18 @@ router.post('/recent', async function (request, response) {
             }
         };
 
-        await Promise.allSettled([getCharacterChatFiles(), getGroupChatFiles()]);
+        const getRootChatFiles = async () => {
+            const dirents = await fs.promises.readdir(request.user.directories.chats, { withFileTypes: true });
+            const chatFiles = dirents.filter(e => e.isFile() && path.extname(e.name) === '.jsonl').map(e => e.name);
+
+            for (const file of chatFiles) {
+                const filePath = path.join(request.user.directories.chats, file);
+                const stats = await fs.promises.stat(filePath);
+                allChatFiles.push({ filePath, mtime: stats.mtimeMs });
+            }
+        };
+
+        await Promise.allSettled([getCharacterChatFiles(), getGroupChatFiles(), getRootChatFiles()]);
 
         const max = parseInt(request.body.max ?? Number.MAX_SAFE_INTEGER);
         const recentChats = allChatFiles.sort((a, b) => b.mtime - a.mtime).slice(0, max);
