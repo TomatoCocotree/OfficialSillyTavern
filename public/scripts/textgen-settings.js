@@ -1152,6 +1152,12 @@ function setSettingByName(setting, value, trigger) {
         return;
     }
 
+    if ('json_schema' === setting) {
+        settings.json_schema = value ?? null;
+        $('#tabby_json_schema').val(value ? JSON.stringify(settings.json_schema, null, 2) : '');
+        return;
+    }
+
     if (value === null || value === undefined) {
         return;
     }
@@ -1189,12 +1195,6 @@ function setSettingByName(setting, value, trigger) {
 
     if ('logit_bias' === setting) {
         settings.logit_bias = Array.isArray(value) ? value : [];
-        return;
-    }
-
-    if ('json_schema' === setting) {
-        settings.json_schema = value ?? null;
-        $('#tabby_json_schema').val(value ? JSON.stringify(settings.json_schema, null, 2) : '');
         return;
     }
 
