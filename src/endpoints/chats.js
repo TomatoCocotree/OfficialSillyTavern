@@ -107,6 +107,8 @@ function importOobaChat(userName, characterName, jsonData) {
     /** @type {object[]} */
     const chat = [{
         chat_metadata: {},
+        user_name: 'unused',
+        character_name: 'unused',
     }];
 
     for (const arr of jsonData.data_visible) {
@@ -146,6 +148,8 @@ function importAgnaiChat(userName, characterName, jsonData) {
     /** @type {object[]} */
     const chat = [{
         chat_metadata: {},
+        user_name: 'unused',
+        character_name: 'unused',
     }];
 
     for (const message of jsonData.messages) {
@@ -178,6 +182,8 @@ function importCAIChat(userName, characterName, jsonData) {
     function convert(history) {
         const starter = {
             chat_metadata: {},
+            user_name: 'unused',
+            character_name: 'unused',
         };
 
         const historyData = history.msgs.map((msg) => ({
@@ -276,6 +282,8 @@ function importRisuChat(userName, characterName, jsonData) {
     /** @type {object[]} */
     const chat = [{
         chat_metadata: {},
+        user_name: 'unused',
+        character_name: 'unused',
     }];
 
     for (const message of jsonData.data.message) {
