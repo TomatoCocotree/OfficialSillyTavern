@@ -696,7 +696,7 @@ router.post('/import', validateAvatarUrlMiddleware, function (request, response)
 
             const jsonData = JSON.parse(header);
 
-            if (!(jsonData.user_name !== undefined || jsonData.name !== undefined)) {
+            if (!(jsonData.user_name !== undefined || jsonData.name !== undefined || jsonData.chat_metadata !== undefined)) {
                 console.error('Incorrect chat format .jsonl');
                 return response.send({ error: true });
             }
