@@ -423,6 +423,7 @@ async function sendMakerSuiteRequest(request, response) {
 
         if (Array.isArray(request.body.tools) && request.body.tools.length > 0 && !enableImageModality && !isGemma) {
             const functionDeclarations = [];
+            const customTools = [];
             for (const tool of request.body.tools) {
                 if (tool.type === 'function') {
                     if (tool.function.parameters?.$schema) {
@@ -433,11 +434,15 @@ async function sendMakerSuiteRequest(request, response) {
                     }
                     functionDeclarations.push(tool.function);
                 } else if (tool[tool.type]) {
-                    tools.push({ [tool.type]: tool[tool.type] });
+                    customTools.push({ [tool.type]: tool[tool.type] });
                 }
             }
             if (functionDeclarations.length > 0) {
                 tools.push({ function_declarations: functionDeclarations });
+            }
+            // Custom tools are only supported when no function calling is present
+            if (functionDeclarations.length === 0 && customTools.length > 0) {
+                tools.push(...customTools);
             }
         }
 
