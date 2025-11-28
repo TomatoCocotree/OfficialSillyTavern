@@ -334,6 +334,7 @@ export const settingsToUpdate = {
     vertexai_auth_mode: ['#vertexai_auth_mode', 'vertexai_auth_mode', false, true],
     vertexai_region: ['#vertexai_region', 'vertexai_region', false, true],
     vertexai_express_project_id: ['#vertexai_express_project_id', 'vertexai_express_project_id', false, true],
+    squash_system_messages: ['#squash_system_messages', 'squash_system_messages', true, false],
     media_inlining: ['#openai_media_inlining', 'media_inlining', true, false],
     inline_image_quality: ['#openai_inline_image_quality', 'inline_image_quality', false, false],
     continue_prefill: ['#continue_prefill', 'continue_prefill', true, false],
@@ -430,6 +431,7 @@ const default_settings = {
     vertexai_auth_mode: 'express',
     vertexai_region: 'us-central1',
     vertexai_express_project_id: '',
+    squash_system_messages: false,
     media_inlining: true,
     inline_image_quality: 'auto',
     bypass_status_check: false,
@@ -1447,6 +1449,10 @@ export async function prepareOpenAIMessages({
     } finally {
         // Pass chat completion to prompt manager for inspection
         promptManager.setChatCompletion(chatCompletion);
+
+        if (oai_settings.squash_system_messages && dryRun == false) {
+            await chatCompletion.squashSystemMessages();
+        }
 
         // All information is up-to-date, render.
         if (false === dryRun) promptManager.render(false);
@@ -3274,6 +3280,46 @@ class MessageCollection {
  *
  */
 export class ChatCompletion {
+    /**
+     * Combines consecutive system messages into one if they have no name attached.
+     * @returns {Promise<void>}
+     */
+    async squashSystemMessages() {
+        const excludeList = ['newMainChat', 'newChat', 'groupNudge'];
+        this.messages.collection = this.messages.flatten();
+
+        let lastMessage = null;
+        let squashedMessages = [];
+
+        for (let message of this.messages.collection) {
+            // Force exclude empty messages
+            if (message.role === 'system' && !message.content) {
+                continue;
+            }
+
+            const shouldSquash = (message) => {
+                return !excludeList.includes(message.identifier) && message.role === 'system' && !message.name;
+            };
+
+            if (shouldSquash(message)) {
+                if (lastMessage && shouldSquash(lastMessage)) {
+                    lastMessage.content += '\n' + message.content;
+                    lastMessage.tokens = await tokenHandler.countAsync({ role: lastMessage.role, content: lastMessage.content });
+                }
+                else {
+                    squashedMessages.push(message);
+                    lastMessage = message;
+                }
+            }
+            else {
+                squashedMessages.push(message);
+                lastMessage = message;
+            }
+        }
+
+        this.messages.collection = squashedMessages;
+    }
+
     /**
      * Initializes a new instance of ChatCompletion.
      * Sets up the initial token budget and a new message collection.
@@ -6109,6 +6155,11 @@ export function initOpenAI() {
 
     $('#electronhub_group_models').on('input', function () {
         oai_settings.electronhub_group_models = !!$(this).prop('checked');
+        saveSettingsDebounced();
+    });
+
+    $('#squash_system_messages').on('input', function () {
+        oai_settings.squash_system_messages = !!$(this).prop('checked');
         saveSettingsDebounced();
     });
 

@@ -631,6 +631,8 @@
         "show_external_models": false,
         "proxy_password": "",
         "assistant_prefill": "",
-        "assistant_impersonation": ""
+        "assistant_impersonation": "",
+        "use_sysprompt": false,
+        "squash_system_messages": false
     }
 }

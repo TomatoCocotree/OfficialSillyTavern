@@ -231,6 +231,7 @@
     "assistant_prefill": "",
     "assistant_impersonation": "",
     "use_sysprompt": false,
+    "squash_system_messages": false,
     "media_inlining": true,
     "bypass_status_check": false,
     "continue_prefill": false,
