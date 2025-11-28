@@ -4378,6 +4378,10 @@ async function sdMessageButton($icon, { animate } = {}) {
         message.extra.media = [];
     }
 
+    if (!message.extra.media.length && !message.extra.media_display) {
+        message.extra.media_display = MEDIA_DISPLAY.GALLERY;
+    }
+
     /** @type {MediaAttachment} */
     const selectedMedia = message.extra.media.length > 0
         ? (message.extra.media[message.extra.media_index] ?? message.extra.media[message.extra.media.length - 1])
