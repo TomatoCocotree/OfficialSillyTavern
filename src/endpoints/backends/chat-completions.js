@@ -436,9 +436,13 @@ async function sendMakerSuiteRequest(request, response) {
                         delete tool.function.parameters;
                     }
                     functionDeclarations.push(tool.function);
+                } else if (tool[tool.type]) {
+                    tools.push({ [tool.type]: tool[tool.type] });
                 }
             }
-            tools.push({ function_declarations: functionDeclarations });
+            if (functionDeclarations.length > 0) {
+                tools.push({ function_declarations: functionDeclarations });
+            }
         }
 
         if (isThinkingConfigModel(model)) {
