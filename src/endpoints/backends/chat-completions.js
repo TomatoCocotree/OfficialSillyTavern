@@ -421,10 +421,6 @@ async function sendMakerSuiteRequest(request, response) {
         const prompt = convertGooglePrompt(request.body.messages, model, useSystemPrompt, getPromptNames(request));
         const safetySettings = [...GEMINI_SAFETY, ...(useVertexAi ? VERTEX_SAFETY : [])];
 
-        if (enableWebSearch && !enableImageModality && !isGemma && !isLearnLM && !noSearchModels.includes(model)) {
-            tools.push({ google_search: {} });
-        }
-
         if (Array.isArray(request.body.tools) && request.body.tools.length > 0 && !enableImageModality && !isGemma) {
             const functionDeclarations = [];
             for (const tool of request.body.tools) {
@@ -442,6 +438,13 @@ async function sendMakerSuiteRequest(request, response) {
             }
             if (functionDeclarations.length > 0) {
                 tools.push({ function_declarations: functionDeclarations });
+            }
+        }
+
+        if (enableWebSearch && !enableImageModality && !isGemma && !isLearnLM && !noSearchModels.includes(model)) {
+            // Tool use with function calling is unsupported
+            if (!tools.some(t => t.function_declarations)) {
+                tools.push({ google_search: {} });
             }
         }
 
