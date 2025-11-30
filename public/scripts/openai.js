@@ -2850,6 +2850,10 @@ function parseChatCompletionLogprobs(data) {
     }
 
     switch (oai_settings.chat_completion_source) {
+        case chat_completion_sources.AIMLAPI:
+            return Object.keys(data?.choices?.[0]?.logprobs ?? {}).includes('content')
+                ? parseOpenAIChatLogprobs(data.choices[0]?.logprobs)
+                : parseOpenAITextLogprobs(data.choices[0]?.logprobs);
         case chat_completion_sources.OPENAI:
         case chat_completion_sources.AZURE_OPENAI:
         case chat_completion_sources.DEEPSEEK:
