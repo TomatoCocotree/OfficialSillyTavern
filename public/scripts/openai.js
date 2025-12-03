@@ -4104,6 +4104,19 @@ async function getStatusOpen() {
 }
 
 /**
+ * Get OpenAI preset body from settings
+ * @param {ChatCompletionSettings} settings The settings object
+ * @returns {Object} The preset body object
+ */
+export function getChatCompletionPreset(settings = oai_settings) {
+    const presetBody = {};
+    for (const [presetKey, [, settingsKey]] of Object.entries(settingsToUpdate)) {
+        presetBody[presetKey] = settings[settingsKey];
+    }
+    return structuredClone(presetBody);
+}
+
+/**
  * Persist a settings preset with the given name
  *
  * @param {string} name - Name of the preset
@@ -4112,11 +4125,7 @@ async function getStatusOpen() {
  * @returns {Promise<void>}
  */
 async function saveOpenAIPreset(name, settings, triggerUi = true) {
-    const presetBody = {};
-    for (const [presetKey, [, settingsKey]] of Object.entries(settingsToUpdate)) {
-        presetBody[presetKey] = settings[settingsKey];
-    }
-
+    const presetBody = getChatCompletionPreset(settings);
     const savePresetSettings = await fetch('/api/presets/save', {
         method: 'POST',
         headers: getRequestHeaders(),
