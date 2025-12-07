@@ -425,7 +425,7 @@ async function updateCurrentAssets() {
     try {
         const result = await fetch('/api/assets/get', {
             method: 'POST',
-            headers: getRequestHeaders(),
+            headers: getRequestHeaders({ omitContentType: true }),
         });
         currentAssets = result.ok ? (await result.json()) : {};
     }
