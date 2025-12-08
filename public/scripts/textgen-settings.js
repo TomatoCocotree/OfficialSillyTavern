@@ -1292,7 +1292,7 @@ export async function generateTextGenWithStreaming(generate_data, signal) {
                 const newText = data?.choices?.[0]?.text || data?.content || '';
                 text += newText;
                 logprobs = parseTextgenLogprobs(newText, data.choices?.[0]?.logprobs || data?.completion_probabilities);
-                state.reasoning += data?.choices?.[0]?.reasoning ?? '';
+                state.reasoning += data?.choices?.[0]?.reasoning ?? data?.choices?.[0]?.thinking ?? '';
             }
 
             yield { text, swipes, logprobs, toolCalls, state };
