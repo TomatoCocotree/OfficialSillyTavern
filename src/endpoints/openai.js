@@ -725,6 +725,12 @@ router.post('/mistral/transcribe-audio', createTranscribeHandler({
     providerName: 'MistralAI',
 }));
 
+router.post('/zai/transcribe-audio', createTranscribeHandler({
+    secretKey: SECRET_KEYS.ZAI,
+    apiUrl: 'https://api.z.ai/api/paas/v4/audio/transcriptions',
+    providerName: 'Z.AI',
+}));
+
 router.post('/chutes/transcribe-audio', async (request, response) => {
     try {
         const key = readSecret(request.user.directories, SECRET_KEYS.CHUTES);
