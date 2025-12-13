@@ -4717,6 +4717,8 @@ function getZaiMaxContext(model, isUnlocked) {
     }
 
     const contextMap = {
+        'glm-4.6v': max_128k,
+        'glm-4.6v-flash': max_128k,
         'glm-4.6': max_200k,
         'glm-4.5': max_128k,
         'glm-4-32b-0414-128k': max_128k,
@@ -5741,6 +5743,7 @@ export function isImageInliningSupported() {
         'moonshot-v1-128k-vision-preview',
         // Z.AI (GLM)
         'glm-4.5v',
+        'glm-4.6v',
         // SiliconFlow
         'Qwen/Qwen3-VL-32B-Instruct',
         'Qwen/Qwen3-VL-8B-Instruct',
