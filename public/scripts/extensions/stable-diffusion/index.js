@@ -2122,6 +2122,7 @@ async function loadDrawthingsModels() {
 
 async function loadOpenAiModels() {
     return [
+        { value: 'gpt-image-1-mini', text: 'gpt-image-1-mini' },
         { value: 'gpt-image-1', text: 'gpt-image-1' },
         { value: 'dall-e-3', text: 'dall-e-3' },
         { value: 'dall-e-2', text: 'dall-e-2' },
@@ -3610,9 +3611,9 @@ async function generateOpenAiImage(prompt, signal) {
     const dalle3PromptLimit = 4000;
     const gptImgPromptLimit = 32000;
 
-    const isDalle2 = extension_settings.sd.model === 'dall-e-2';
-    const isDalle3 = extension_settings.sd.model === 'dall-e-3';
-    const isGptImg = extension_settings.sd.model === 'gpt-image-1';
+    const isDalle2 = /dall-e-2/.test(extension_settings.sd.model);
+    const isDalle3 = /dall-e-3/.test(extension_settings.sd.model);
+    const isGptImg = /gpt-image-1/.test(extension_settings.sd.model);
     const isSora2 = /sora-2/.test(extension_settings.sd.model);
 
     if (isDalle2 && prompt.length > dalle2PromptLimit) {
