@@ -5870,12 +5870,15 @@ export function isVideoInliningSupported() {
         return false;
     }
 
-    // Only Gemini models support video for now
     const videoSupportedModels = [
+        // Gemini
         'gemini-2.0',
         'gemini-2.5',
         'gemini-exp-1206',
         'gemini-3',
+        // Z.AI (GLM)
+        'glm-4.5v',
+        'glm-4.6v',
     ];
 
     switch (oai_settings.chat_completion_source) {
@@ -5885,6 +5888,8 @@ export function isVideoInliningSupported() {
             return videoSupportedModels.some(model => oai_settings.vertexai_model.includes(model));
         case chat_completion_sources.OPENROUTER:
             return (Array.isArray(model_list) && model_list.find(m => m.id === oai_settings.openrouter_model)?.architecture?.input_modalities?.includes('video'));
+        case chat_completion_sources.ZAI:
+            return videoSupportedModels.some(model => oai_settings.zai_model.includes(model));
         default:
             return false;
     }
