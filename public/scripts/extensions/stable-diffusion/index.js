@@ -91,6 +91,7 @@ const sources = {
     xai: 'xai',
     google: 'google',
     zai: 'zai',
+    openrouter: 'openrouter',
 };
 
 const initiators = {
@@ -1325,6 +1326,7 @@ async function onModelChange() {
         sources.google,
         sources.chutes,
         sources.zai,
+        sources.openrouter,
     ];
 
     if (cloudSources.includes(extension_settings.sd.source)) {
@@ -1561,6 +1563,9 @@ async function loadSamplers() {
         case sources.zai:
             samplers = ['N/A'];
             break;
+        case sources.openrouter:
+            samplers = ['N/A'];
+            break;
     }
 
     for (const sampler of samplers) {
@@ -1768,6 +1773,9 @@ async function loadModels() {
             break;
         case sources.zai:
             models = await loadZaiModels();
+            break;
+        case sources.openrouter:
+            models = await loadOpenRouterModels();
             break;
     }
 
@@ -2253,6 +2261,19 @@ async function loadZaiModels() {
     return ['cogview-4-250304'].map(name => ({ value: name, text: name }));
 }
 
+async function loadOpenRouterModels() {
+    const result = await fetch('/api/openrouter/models/image', {
+        method: 'POST',
+        headers: getRequestHeaders({ omitContentType: true }),
+    });
+
+    if (result.ok) {
+        return await result.json();
+    }
+
+    return [];
+}
+
 function loadNovelSchedulers() {
     return ['karras', 'native', 'exponential', 'polyexponential'];
 }
@@ -2345,6 +2366,9 @@ async function loadSchedulers() {
             schedulers = ['N/A'];
             break;
         case sources.zai:
+            schedulers = ['N/A'];
+            break;
+        case sources.openrouter:
             schedulers = ['N/A'];
             break;
     }
@@ -2451,6 +2475,9 @@ async function loadVaes() {
             vaes = ['N/A'];
             break;
         case sources.zai:
+            vaes = ['N/A'];
+            break;
+        case sources.openrouter:
             vaes = ['N/A'];
             break;
     }
@@ -3050,6 +3077,9 @@ async function sendGenerationRequest(generationType, prompt, additionalNegativeP
                 break;
             case sources.zai:
                 result = await generateZaiImage(prefixedPrompt, signal);
+                break;
+            case sources.openrouter:
+                result = await generateOpenRouterImage(prefixedPrompt, signal);
                 break;
         }
 
@@ -4161,6 +4191,33 @@ async function generateZaiImage(prompt, signal) {
     throw new Error(text);
 }
 
+/**
+ * Generates an image using the OpenRouter API.
+ * @param {string} prompt The main instruction used to guide the image generation.
+ * @param {AbortSignal} signal An AbortSignal object that can be used to cancel the request.
+ * @returns {Promise<{format: string, data: string}>}
+ */
+async function generateOpenRouterImage(prompt, signal) {
+    const result = await fetch('/api/openrouter/image/generate', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        signal: signal,
+        body: JSON.stringify({
+            model: extension_settings.sd.model,
+            prompt: prompt,
+            aspect_ratio: getClosestAspectRatio(extension_settings.sd.width, extension_settings.sd.height, 'stability'),
+        }),
+    });
+
+    if (result.ok) {
+        const data = await result.json();
+        return { format: 'jpg', data: data.image };
+    }
+
+    const text = await result.text();
+    throw new Error(text);
+}
+
 async function onComfyOpenWorkflowEditorClick() {
     let workflow = await (await fetch('/api/sd/comfy/workflow', {
         method: 'POST',
@@ -4469,6 +4526,8 @@ function isValidState() {
             return secret_state[SECRET_KEYS.MAKERSUITE] || secret_state[SECRET_KEYS.VERTEXAI] || secret_state[SECRET_KEYS.VERTEXAI_SERVICE_ACCOUNT];
         case sources.zai:
             return secret_state[SECRET_KEYS.ZAI];
+        case sources.openrouter:
+            return secret_state[SECRET_KEYS.OPENROUTER];
         default:
             return false;
     }
