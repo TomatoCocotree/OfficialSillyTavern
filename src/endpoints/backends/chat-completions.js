@@ -474,8 +474,12 @@ async function sendMakerSuiteRequest(request, response) {
             const thinkingConfig = { includeThoughts: includeReasoning };
 
             const thinkingBudget = calculateGoogleBudgetTokens(generationConfig.maxOutputTokens, reasoningEffort, model);
-            if (Number.isInteger(thinkingBudget)) {
+            if (typeof thinkingBudget === 'number' && Number.isInteger(thinkingBudget)) {
                 thinkingConfig.thinkingBudget = thinkingBudget;
+            }
+
+            if (typeof thinkingBudget === 'string' && thinkingBudget.length > 0) {
+                thinkingConfig.thinkingLevel = thinkingBudget;
             }
 
             // Vertex doesn't allow mixing disabled thinking with includeThoughts

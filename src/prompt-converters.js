@@ -1145,7 +1145,7 @@ export function calculateClaudeBudgetTokens(maxTokens, reasoningEffort, stream) 
  * @param {number} maxTokens Maximum tokens
  * @param {string} reasoningEffort Reasoning effort
  * @param {string} model Model name
- * @returns {number?} Budget tokens
+ * @returns {number|string|null} Budget tokens
  */
 export function calculateGoogleBudgetTokens(maxTokens, reasoningEffort, model) {
     function getFlashBudget() {
@@ -1230,15 +1230,61 @@ export function calculateGoogleBudgetTokens(maxTokens, reasoningEffort, model) {
         return budgetTokens;
     }
 
-    if (model.includes('flash-lite')) {
+    function getGemini3FlashBudget() {
+        switch (reasoningEffort) {
+            case REASONING_EFFORT.auto:
+                return null;
+            case REASONING_EFFORT.min:
+                return 'minimal';
+            case REASONING_EFFORT.low:
+                return 'low';
+            case REASONING_EFFORT.medium:
+                return 'medium';
+            case REASONING_EFFORT.high:
+                return 'high';
+            case REASONING_EFFORT.max:
+                return 'high';
+        }
+
+        return null;
+    }
+
+    function getGemini3ProBudget() {
+        switch (reasoningEffort) {
+            case REASONING_EFFORT.auto:
+                return null;
+            case REASONING_EFFORT.min:
+                return 'low';
+            case REASONING_EFFORT.low:
+                return 'low';
+            case REASONING_EFFORT.medium:
+                return 'low';
+            case REASONING_EFFORT.high:
+                return 'high';
+            case REASONING_EFFORT.max:
+                return 'high';
+        }
+
+        return null;
+    }
+
+    if (/gemini-3-pro/.test(model)) {
+        return getGemini3ProBudget();
+    }
+
+    if (/gemini-3-flash/.test(model) ) {
+        return getGemini3FlashBudget();
+    }
+
+    if (/flash-lite/.test(model)) {
         return getFlashLiteBudget();
     }
 
-    if (model.includes('flash')) {
+    if (/flash/.test(model)) {
         return getFlashBudget();
     }
 
-    if (model.includes('pro')) {
+    if (/pro/.test(model)) {
         return getProBudget();
     }
 
