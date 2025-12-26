@@ -767,8 +767,8 @@ export function initDefaultSlashCommands() {
     }));
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
         name: 'message-name',
-        callback: changeMessageName,
-        returns: 'The updated name of the message sender',
+        callback: messageNameCallback,
+        returns: 'The name of the message sender',
         namedArgumentList: [
             SlashCommandNamedArgument.fromProps({
                 name: 'at',
@@ -782,7 +782,7 @@ export function initDefaultSlashCommands() {
             SlashCommandArgument.fromProps({
                 description: 'Persona name, character name, or unique character identifier (avatar key)',
                 typeList: [ARGUMENT_TYPE.STRING],
-                isRequired: true,
+                isRequired: false,
                 enumProvider: (executor) => {
                     let modifyAt = Number(executor.namedArgumentList.find(arg => arg.name === 'at')?.value ?? (chat.length - 1));
                     if (!isNaN(modifyAt) && (modifyAt < 0 || Object.is(modifyAt, -0))) {
@@ -797,10 +797,16 @@ export function initDefaultSlashCommands() {
         helpString: `
         <div>
             Changes the name of a message sender to one of your choice.
+            If no name is provided, just gets the current name of the message sender.
+            If no index is provided, the last message is chosen.
         </div>
         <div>
             <strong>Example:</strong>
             <ul>
+                <li>
+                    <pre><code>/message-name | /echo</code></pre>
+                    Will output the name of the sender of the last message.
+                </li>
                 <li>
                     <pre><code>/message-name at=-2 "Chloe"</code></pre>
                     Will change the third message from the bottom to be sent by "Chloe".
@@ -4562,13 +4568,7 @@ export function getNameAndAvatarForMessage(character, name = null) {
  *
  * @returns {Promise<string>} The updated message name.
  */
-export async function changeMessageName(args, name) {
-    name = String(name ?? '').trim();
-    if (!name) {
-        toastr.warning(t`You must provide a name to change the message to.`);
-        return '';
-    }
-
+export async function messageNameCallback(args, name) {
     let modifyAt = Number(args?.at ?? (chat.length - 1));
     // Convert possible depth parameter to index
     if (!isNaN(modifyAt) && (modifyAt < 0 || Object.is(modifyAt, -0))) {
@@ -4580,6 +4580,11 @@ export async function changeMessageName(args, name) {
     if (!message) {
         toastr.warning(t`No message found at the specified index.`);
         return '';
+    }
+
+    name = String(name ?? '').trim();
+    if (!name) {
+        return message.name;
     }
 
     let newName = '';
