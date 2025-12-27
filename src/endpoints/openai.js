@@ -5,7 +5,7 @@ import fetch from 'node-fetch';
 import FormData from 'form-data';
 import express from 'express';
 
-import { getConfigValue, mergeObjectWithYaml, excludeKeysByYaml, trimV1 } from '../util.js';
+import { getConfigValue, mergeObjectWithYaml, excludeKeysByYaml, trimV1, delay } from '../util.js';
 import { setAdditionalHeaders } from '../additional-headers.js';
 import { readSecret, SECRET_KEYS } from './secrets.js';
 import { AIMLAPI_HEADERS, OPENROUTER_HEADERS } from '../constants.js';
@@ -83,6 +83,10 @@ router.post('/caption-image', async (request, response) => {
 
         if (request.body.api === 'electronhub') {
             key = readSecret(request.user.directories, SECRET_KEYS.ELECTRONHUB);
+        }
+
+        if (request.body.api === 'zai') {
+            key = readSecret(request.user.directories, SECRET_KEYS.ZAI);
         }
 
         const noKeyTypes = ['custom', 'ooba', 'koboldcpp', 'vllm', 'llamacpp', 'pollinations'];
@@ -175,6 +179,10 @@ router.post('/caption-image', async (request, response) => {
 
         if (request.body.api === 'electronhub') {
             apiUrl = 'https://api.electronhub.ai/v1/chat/completions';
+        }
+
+        if (request.body.api === 'zai') {
+            apiUrl = 'https://api.z.ai/api/paas/v4/chat/completions';
         }
 
         if (['koboldcpp', 'vllm', 'llamacpp', 'ooba'].includes(request.body.api)) {
@@ -325,6 +333,104 @@ router.post('/generate-voice', async (request, response) => {
     }
 });
 
+// ElectronHub TTS proxy
+router.post('/electronhub/generate-voice', async (request, response) => {
+    try {
+        const key = readSecret(request.user.directories, SECRET_KEYS.ELECTRONHUB);
+
+        if (!key) {
+            console.warn('No ElectronHub key found');
+            return response.sendStatus(400);
+        }
+
+        const requestBody = {
+            input: request.body.input,
+            voice: request.body.voice,
+            speed: request.body.speed ?? 1,
+            temperature: request.body.temperature ?? undefined,
+            model: request.body.model || 'tts-1',
+            response_format: 'mp3',
+        };
+
+        // Optional provider-specific params
+        if (request.body.instructions) requestBody.instructions = request.body.instructions;
+        if (request.body.speaker_transcript) requestBody.speaker_transcript = request.body.speaker_transcript;
+        if (Number.isFinite(request.body.cfg_scale)) requestBody.cfg_scale = Number(request.body.cfg_scale);
+        if (Number.isFinite(request.body.cfg_filter_top_k)) requestBody.cfg_filter_top_k = Number(request.body.cfg_filter_top_k);
+        if (Number.isFinite(request.body.speech_rate)) requestBody.speech_rate = Number(request.body.speech_rate);
+        if (Number.isFinite(request.body.pitch_adjustment)) requestBody.pitch_adjustment = Number(request.body.pitch_adjustment);
+        if (request.body.emotional_style) requestBody.emotional_style = request.body.emotional_style;
+
+        // Handle dynamic parameters sent from the frontend
+        const knownParams = new Set(Object.keys(requestBody));
+        for (const key in request.body) {
+            if (!knownParams.has(key) && request.body[key] !== undefined) {
+                requestBody[key] = request.body[key];
+            }
+        }
+
+        // Clean undefineds
+        Object.keys(requestBody).forEach(k => requestBody[k] === undefined && delete requestBody[k]);
+
+        console.debug('ElectronHub TTS request', requestBody);
+
+        const result = await fetch('https://api.electronhub.ai/v1/audio/speech', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${key}`,
+            },
+            body: JSON.stringify(requestBody),
+        });
+
+        if (!result.ok) {
+            const text = await result.text();
+            console.warn('ElectronHub TTS request failed', result.statusText, text);
+            return response.status(500).send(text);
+        }
+
+        const contentType = result.headers.get('content-type') || 'audio/mpeg';
+        const buffer = await result.arrayBuffer();
+        response.setHeader('Content-Type', contentType);
+        return response.send(Buffer.from(buffer));
+    } catch (error) {
+        console.error('ElectronHub TTS generation failed', error);
+        response.status(500).send('Internal server error');
+    }
+});
+
+// ElectronHub model list
+router.post('/electronhub/models', async (request, response) => {
+    try {
+        const key = readSecret(request.user.directories, SECRET_KEYS.ELECTRONHUB);
+
+        if (!key) {
+            console.warn('No ElectronHub key found');
+            return response.sendStatus(400);
+        }
+
+        const result = await fetch('https://api.electronhub.ai/v1/models', {
+            method: 'GET',
+            headers: {
+                Authorization: `Bearer ${key}`,
+            },
+        });
+
+        if (!result.ok) {
+            const text = await result.text();
+            console.warn('ElectronHub models request failed', result.statusText, text);
+            return response.status(500).send(text);
+        }
+
+        const data = await result.json();
+        const models = data && Array.isArray(data['data']) ? data['data'] : [];
+        return response.json(models);
+    } catch (error) {
+        console.error('ElectronHub models fetch failed', error);
+        response.status(500).send('Internal server error');
+    }
+});
+
 router.post('/generate-image', async (request, response) => {
     try {
         const key = readSecret(request.user.directories, SECRET_KEYS.OPENAI);
@@ -355,6 +461,107 @@ router.post('/generate-image', async (request, response) => {
         return response.json(data);
     } catch (error) {
         console.error(error);
+        response.status(500).send('Internal server error');
+    }
+});
+
+router.post('/generate-video', async (request, response) => {
+    try {
+        const controller = new AbortController();
+        request.socket.removeAllListeners('close');
+        request.socket.on('close', function () {
+            controller.abort();
+        });
+
+        const key = readSecret(request.user.directories, SECRET_KEYS.OPENAI);
+
+        if (!key) {
+            console.warn('No OpenAI key found');
+            return response.sendStatus(400);
+        }
+
+        console.debug('OpenAI video generation request', request.body);
+
+        const videoJobResponse = await fetch('https://api.openai.com/v1/videos', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${key}`,
+            },
+            body: JSON.stringify({
+                prompt: request.body.prompt,
+                model: request.body.model || 'sora-2',
+                size: request.body.size || '720x1280',
+                seconds: request.body.seconds || '8',
+            }),
+        });
+
+        if (!videoJobResponse.ok) {
+            const text = await videoJobResponse.text();
+            console.warn('OpenAI video generation request failed', videoJobResponse.statusText, text);
+            return response.status(500).send(text);
+        }
+
+        /** @type {any} */
+        const videoJob = await videoJobResponse.json();
+
+        if (!videoJob || !videoJob.id) {
+            console.warn('OpenAI video generation returned no job ID', videoJob);
+            return response.status(500).send('No video job ID returned');
+        }
+
+        // Poll for video generation completion
+        for (let attempt = 0; attempt < 30; attempt++) {
+            if (controller.signal.aborted) {
+                console.info('OpenAI video generation aborted by client');
+                return response.status(500).send('Video generation aborted by client');
+            }
+
+            await delay(5000 + attempt * 1000);
+            console.debug(`Polling OpenAI video job ${videoJob.id}, attempt ${attempt + 1}`);
+
+            const pollResponse = await fetch(`https://api.openai.com/v1/videos/${videoJob.id}`, {
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${key}`,
+                },
+            });
+
+            if (!pollResponse.ok) {
+                const text = await pollResponse.text();
+                console.warn('OpenAI video job polling failed', pollResponse.statusText, text);
+                return response.status(500).send(text);
+            }
+
+            /** @type {any} */
+            const pollResult = await pollResponse.json();
+            console.debug(`OpenAI video job status: ${pollResult.status}, progress: ${pollResult.progress}`);
+
+            if (pollResult.status === 'failed') {
+                console.warn('OpenAI video generation failed', pollResult);
+                return response.status(500).send('Video generation failed');
+            }
+
+            if (pollResult.status === 'completed') {
+                const contentResponse = await fetch(`https://api.openai.com/v1/videos/${videoJob.id}/content`, {
+                    method: 'GET',
+                    headers: {
+                        'Authorization': `Bearer ${key}`,
+                    },
+                });
+
+                if (!contentResponse.ok) {
+                    const text = await contentResponse.text();
+                    console.warn('OpenAI video content fetch failed', contentResponse.statusText, text);
+                    return response.status(500).send(text);
+                }
+
+                const contentBuffer = await contentResponse.arrayBuffer();
+                return response.send({ format: 'mp4', data: Buffer.from(contentBuffer).toString('base64') });
+            }
+        }
+    } catch (error) {
+        console.error('OpenAI video generation failed', error);
         response.status(500).send('Internal server error');
     }
 });
